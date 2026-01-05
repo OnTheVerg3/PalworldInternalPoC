@@ -95,9 +95,7 @@ bool IsValidPtr(void* ptr) {
     return !IsBadReadPtr(ptr, 8);
 }
 
-// [CRITICAL] Enhanced IsValidObject
-// This is now used in the hot path instead of FastValidateObject.
-// It uses IsBadReadPtr to prevent 0xFF Access Violations.
+// Check if memory is valid before reading it
 bool IsValidObject(SDK::UObject* pObj) {
     if (!IsValidPtr(pObj)) return false;
 
@@ -108,9 +106,6 @@ bool IsValidObject(SDK::UObject* pObj) {
     void* vtable = *vtablePtr;
     if (IsGarbagePtr(vtable)) return false;
     if (IsBadReadPtr(vtable, 8)) return false;
-
-    // Optional: Check if VTable is within module bounds (if bounds known)
-    // if (g_GameBase != 0) { ... } 
 
     return true;
 }
@@ -164,22 +159,21 @@ bool IsValidSignature(uintptr_t addr) {
     return false;
 }
 
-// --- CLEANUP HELPERS ---
-void SafeDisable(void* target) {
-    __try { MH_DisableHook(target); }
-    __except (1) {}
-}
-
+// --- CLEANUP HELPER ---
+// [FIX] No MinHook calls here. We leave hooks active but ignore them via g_bIsSafe.
 void PerformWorldExit() {
-    // 1. Reset Pointers
+    std::cout << "[System] World Exit. Resetting State (Hooks Active)." << std::endl;
+
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
 
-    // 2. Clear Logic State (Hooks stay enabled to prevent race conditions)
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
+        // We do NOT clear g_ActiveHooks because we aren't unhooking.
+        // We just clear the object list to force a refresh on re-join.
         g_HookedObjects.clear();
+
         g_bPawnHooked = false;
         g_bControllerHooked = false;
         g_bParamHooked = false;
@@ -227,10 +221,11 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     // [CRITICAL] DETECT SELF-DESTRUCTION
     if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
         if (pObject == g_pLocal) {
+            // Player is dying. Stop tracking instantly.
             g_pLocal = nullptr;
             g_pController = nullptr;
             g_pParam = nullptr;
-            g_bIsSafe = false;
+            g_bIsSafe = false; // Trigger unsafe mode
         }
         return false;
     }
@@ -268,18 +263,19 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. STRICT VALIDATION [Prevents 0xFF Crash]
-    // Use IsValidObject which uses IsBadReadPtr.
-    // If memory is not readable (Zombie/Sentinel), DROP IT.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
-    }
-
-    // 2. UNSAFE MODE (Transition / Menu)
-    // Pass valid objects through without logic.
+    // 1. UNSAFE MODE (Transition / Menu) - [PRIORITY FIX]
+    // Check safety FIRST. If unsafe, pass-through immediately.
+    // This avoids IsValidObject/IsBadReadPtr on 0xFF pointers during destruction.
     if (!g_bIsSafe || !SDK::UWorld::GetWorld()) {
         __try { if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams); }
         __except (1) {}
+        return;
+    }
+
+    // 2. STRICT VALIDATION (Safe Mode)
+    // Now that we believe we are in-game, verify pointers are actually readable.
+    // If not, DROP them (return). Do NOT pass garbage to engine.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
@@ -290,8 +286,8 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return;
     }
 
-    // 4. SAFE MODE (Gameplay)
-    // GetNameSafe is only called here (Safe Mode), preventing freeze.
+    // 4. CHEAT LOGIC
+    // We are safe, validated, and targeted.
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
 
@@ -344,6 +340,7 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
             std::cout << "[+] Hooked " << debugName << std::endl;
         }
         else if (status == MH_ERROR_ALREADY_CREATED) {
+            // Ensure it's enabled if we are re-attaching
             MH_EnableHook(pTarget);
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
@@ -355,6 +352,7 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
         }
     }
     else {
+        // If already tracked, just ensure enabled
         MH_EnableHook(pTarget);
     }
 
@@ -429,6 +427,7 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
+    // Only hook if latches are false (Reset by PerformWorldExit)
     if (g_bPawnHooked && g_bControllerHooked && g_bParamHooked) return;
 
     if (pLocal != g_LastLocalPlayer) {
