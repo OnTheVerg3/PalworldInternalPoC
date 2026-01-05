@@ -159,8 +159,27 @@ bool IsValidSignature(uintptr_t addr) {
     return false;
 }
 
+// --- SANITIZER HELPER ---
+bool FastValidateObject(SDK::UObject* pObject) {
+    if (!pObject) return false;
+    uintptr_t addr = (uintptr_t)pObject;
+    if (addr == 0xFFFFFFFFFFFFFFFF) return false;
+    if (addr < 0x10000) return false;
+    if (addr % 8 != 0) return false;
+
+    // VTable Dereference (Safely)
+    __try {
+        void* vtable = *(void**)pObject;
+        uintptr_t vtAddr = (uintptr_t)vtable;
+        if (vtAddr == 0xFFFFFFFFFFFFFFFF) return false;
+        if (vtAddr < 0x10000) return false;
+        if (vtAddr % 8 != 0) return false;
+    }
+    __except (1) { return false; }
+    return true;
+}
+
 // --- CLEANUP HELPER ---
-// [FIX] No MinHook calls here. We leave hooks active but ignore them via g_bIsSafe.
 void PerformWorldExit() {
     std::cout << "[System] World Exit. Resetting State (Hooks Active)." << std::endl;
 
@@ -170,10 +189,7 @@ void PerformWorldExit() {
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
-        // We do NOT clear g_ActiveHooks because we aren't unhooking.
-        // We just clear the object list to force a refresh on re-join.
         g_HookedObjects.clear();
-
         g_bPawnHooked = false;
         g_bControllerHooked = false;
         g_bParamHooked = false;
@@ -221,11 +237,10 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     // [CRITICAL] DETECT SELF-DESTRUCTION
     if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
         if (pObject == g_pLocal) {
-            // Player is dying. Stop tracking instantly.
             g_pLocal = nullptr;
             g_pController = nullptr;
             g_pParam = nullptr;
-            g_bIsSafe = false; // Trigger unsafe mode
+            g_bIsSafe = false;
         }
         return false;
     }
@@ -263,19 +278,19 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. UNSAFE MODE (Transition / Menu) - [PRIORITY FIX]
-    // Check safety FIRST. If unsafe, pass-through immediately.
-    // This avoids IsValidObject/IsBadReadPtr on 0xFF pointers during destruction.
+    // 1. FAST VALIDATION & SENTINEL CHECK [MOVED TO TOP]
+    // We MUST check this first. If pObject is 0xFF..., passing it to 
+    // the Unsafe Mode block below will crash when oProcessEvent tries to read it.
+    if (!FastValidateObject(pObject) || !FastValidateObject(pFunction)) {
+        return; // Drop invalid pointers instantly
+    }
+
+    // 2. UNSAFE MODE (Transition / Menu)
+    // If we are here, pObject is at least a valid pointer (not -1).
+    // Safe to pass to engine.
     if (!g_bIsSafe || !SDK::UWorld::GetWorld()) {
         __try { if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams); }
         __except (1) {}
-        return;
-    }
-
-    // 2. STRICT VALIDATION (Safe Mode)
-    // Now that we believe we are in-game, verify pointers are actually readable.
-    // If not, DROP them (return). Do NOT pass garbage to engine.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
@@ -286,8 +301,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return;
     }
 
-    // 4. CHEAT LOGIC
-    // We are safe, validated, and targeted.
+    // 4. SAFE MODE (Gameplay)
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
 
@@ -340,7 +354,6 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
             std::cout << "[+] Hooked " << debugName << std::endl;
         }
         else if (status == MH_ERROR_ALREADY_CREATED) {
-            // Ensure it's enabled if we are re-attaching
             MH_EnableHook(pTarget);
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
@@ -352,7 +365,6 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
         }
     }
     else {
-        // If already tracked, just ensure enabled
         MH_EnableHook(pTarget);
     }
 
@@ -379,7 +391,6 @@ bool ScanAndHook(SDK::UObject* pObject, int startIdx, int endIdx, const char* de
     return false;
 }
 
-// --- ROBUST PLAYER RETRIEVAL ---
 SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
     __try {
         SDK::UWorld* pWorld = SDK::UWorld::GetWorld();
@@ -427,7 +438,6 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
-    // Only hook if latches are false (Reset by PerformWorldExit)
     if (g_bPawnHooked && g_bControllerHooked && g_bParamHooked) return;
 
     if (pLocal != g_LastLocalPlayer) {
@@ -447,12 +457,10 @@ void AttachPlayerHooks_Logic() {
     }
 }
 
-// --- SAFE FRAME LOGIC ---
 void Present_Logic() {
     ULONGLONG CurrentTime = GetTickCount64();
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
 
-    // 1. DETECTION OF LEVEL TRANSITION
     if (!pLocal) {
         g_bIsSafe = false;
 
@@ -473,7 +481,6 @@ void Present_Logic() {
 
     g_TimePlayerLost = 0;
 
-    // 2. STABILIZATION
     if (g_TimePlayerDetected == 0) {
         g_TimePlayerDetected = CurrentTime;
         std::cout << "[System] Player detected. Stabilizing..." << std::endl;
@@ -483,7 +490,6 @@ void Present_Logic() {
         return;
     }
 
-    // 3. ACTIVE
     g_bIsSafe = true;
     AttachPlayerHooks_Logic();
 
