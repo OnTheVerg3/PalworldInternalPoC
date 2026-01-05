@@ -9,7 +9,6 @@ def run_git_command(args, cwd):
     Returns the output if successful.
     """
     try:
-        # We use run() to execute the command and capture output
         result = subprocess.run(
             args,
             cwd=cwd,
@@ -20,11 +19,9 @@ def run_git_command(args, cwd):
         )
         return result.stdout.strip()
     except subprocess.CalledProcessError as e:
-        # If the command fails, we check if it is a benign error
         error_msg = e.stderr.strip()
         output_msg = e.stdout.strip()
         
-        # Git returns exit code 1 if there is nothing to commit, which is not a failure for us
         if "nothing to commit" in output_msg or "nothing to commit" in error_msg:
             return "NO_CHANGES"
             
@@ -34,7 +31,6 @@ def run_git_command(args, cwd):
         sys.exit(1)
 
 def main():
-    # Determine target directory: provided as arg or defaults to script location
     if len(sys.argv) > 1:
         project_root = sys.argv[1]
     else:
@@ -43,7 +39,6 @@ def main():
     print(f"Initialize Auto-Sync for: {project_root}")
 
     # 1. Stage Changes
-    # This respects the .gitignore you created (ignoring Deps, SDK, builds, etc.)
     print("Staging changes...")
     run_git_command(["git", "add", "."], project_root)
 
@@ -58,10 +53,10 @@ def main():
         print("Status: No file changes detected. Skipping push.")
         sys.exit(0)
 
-    # 3. Push to Remote
-    # We explicitly push to 'main' on 'origin'
-    print("Pushing to GitHub origin/main...")
-    run_git_command(["git", "push", "origin", "main"], project_root)
+    # 3. Push to Remote (Force)
+    # Added "--force" to overwrite remote history with local history
+    print("Pushing to GitHub origin/main (FORCE)...")
+    run_git_command(["git", "push", "origin", "main", "--force"], project_root)
 
     print("Success: Repository synchronization complete.")
 
