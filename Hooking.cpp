@@ -110,7 +110,6 @@ bool IsValidObject(SDK::UObject* pObj) {
     return true;
 }
 
-// --- SAFE STRING HANDLING ---
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -132,7 +131,6 @@ void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     }
 }
 
-// --- UTILS ---
 bool RawStrContains(const char* haystack, const char* needle) {
     if (!haystack || !needle) return false;
     size_t hLen = strlen(haystack);
@@ -163,14 +161,13 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- SANITIZER HELPER ---
 bool FastValidateObject(SDK::UObject* pObject) {
-    // 1. Math Checks
     if (!pObject) return false;
     uintptr_t addr = (uintptr_t)pObject;
     if (addr == 0xFFFFFFFFFFFFFFFF) return false;
     if (addr < 0x10000) return false;
     if (addr % 8 != 0) return false;
 
-    // 2. VTable Dereference (Safely)
+    // VTable Dereference (Safely)
     __try {
         void* vtable = *(void**)pObject;
         uintptr_t vtAddr = (uintptr_t)vtable;
@@ -192,8 +189,7 @@ void PerformWorldExit() {
     g_pParam = nullptr;
 
     // 2. Clear Logic State (But DO NOT Disable Hooks)
-    // This leaves the trampoline active but the hook will effectively "pass-through"
-    // because g_bIsSafe is false. This prevents race conditions during code rewriting.
+    // This stops the Race Condition. The hooks stay active but in "Pass-Through" mode.
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
         g_HookedObjects.clear();
@@ -207,7 +203,6 @@ void PerformWorldExit() {
     Player::Reset();
 }
 
-// --- INPUT HANDLER ---
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
@@ -249,7 +244,7 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
             g_pParam = nullptr;
             g_bIsSafe = false;
         }
-        return false;
+        return false; // Return FALSE to allow execution to proceed (pass to original)
     }
 
     if (!Hooking::bFoundValidTraffic) {
@@ -285,14 +280,14 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. FAST VALIDATION & SENTINEL CHECK
-    // If pointer is garbage, DROP IT. Passing garbage causes 0xFF crash.
+    // 1. FAST VALIDATION (Prevent 0xFF Sentinel Crash)
+    // If invalid, DROP IT. Passing garbage to engine is fatal.
     if (!FastValidateObject(pObject) || !FastValidateObject(pFunction)) {
         return;
     }
 
     // 2. UNSAFE MODE (Transition / Menu)
-    // Pass everything through safely.
+    // Pass everything through safely. No logic.
     if (!g_bIsSafe || !SDK::UWorld::GetWorld()) {
         __try { if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams); }
         __except (1) {}
@@ -300,6 +295,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     }
 
     // 3. WHITE-LIST FILTER
+    // If pointers are cleared (World Exit), this fails safely and passes through.
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         __try { if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams); }
         __except (1) {}
@@ -324,6 +320,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         bBlock = false;
     }
 
+    // If logic says block, we return. Otherwise, pass to original.
     if (bBlock) return;
 
     __try {
@@ -359,6 +356,7 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
             std::cout << "[+] Hooked " << debugName << std::endl;
         }
         else if (status == MH_ERROR_ALREADY_CREATED) {
+            // If already created, ensure enabled (Wake Up)
             MH_EnableHook(pTarget);
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
@@ -445,6 +443,8 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
+    // If latches are false (reset by exit), we try to hook.
+    // HookIndex handles duplicates gracefully now.
     if (g_bPawnHooked && g_bControllerHooked && g_bParamHooked) return;
 
     if (pLocal != g_LastLocalPlayer) {
