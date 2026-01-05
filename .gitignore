@@ -1,0 +1,14 @@
+builds/
+Deps/
+SDK/
+*.slnx 
+bin/
+obj/
+.vs/
+*.user
+x64/
+*.filters
+*.vcxproj
+*.hpp
+*.inl
+
