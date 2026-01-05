@@ -95,18 +95,23 @@ bool IsValidPtr(void* ptr) {
     return !IsBadReadPtr(ptr, 8);
 }
 
+// [CRITICAL] Enhanced IsValidObject
+// This is now used in the hot path instead of FastValidateObject.
+// It uses IsBadReadPtr to prevent 0xFF Access Violations.
 bool IsValidObject(SDK::UObject* pObj) {
     if (!IsValidPtr(pObj)) return false;
-    void* vtable = *reinterpret_cast<void***>(pObj);
+
+    // Validate VTable Pointer
+    void** vtablePtr = reinterpret_cast<void**>(pObj);
+    if (IsBadReadPtr(vtablePtr, 8)) return false;
+
+    void* vtable = *vtablePtr;
     if (IsGarbagePtr(vtable)) return false;
     if (IsBadReadPtr(vtable, 8)) return false;
 
-    if (g_GameBase != 0) {
-        uintptr_t vtableAddr = (uintptr_t)vtable;
-        if (vtableAddr < g_GameBase || vtableAddr >(g_GameBase + g_GameSize)) {
-            return false;
-        }
-    }
+    // Optional: Check if VTable is within module bounds (if bounds known)
+    // if (g_GameBase != 0) { ... } 
+
     return true;
 }
 
@@ -159,37 +164,19 @@ bool IsValidSignature(uintptr_t addr) {
     return false;
 }
 
-// --- SANITIZER HELPER ---
-bool FastValidateObject(SDK::UObject* pObject) {
-    if (!pObject) return false;
-    uintptr_t addr = (uintptr_t)pObject;
-    if (addr == 0xFFFFFFFFFFFFFFFF) return false;
-    if (addr < 0x10000) return false;
-    if (addr % 8 != 0) return false;
-
-    // VTable Dereference (Safely)
-    __try {
-        void* vtable = *(void**)pObject;
-        uintptr_t vtAddr = (uintptr_t)vtable;
-        if (vtAddr == 0xFFFFFFFFFFFFFFFF) return false;
-        if (vtAddr < 0x10000) return false;
-        if (vtAddr % 8 != 0) return false;
-    }
-    __except (1) { return false; }
-    return true;
+// --- CLEANUP HELPERS ---
+void SafeDisable(void* target) {
+    __try { MH_DisableHook(target); }
+    __except (1) {}
 }
 
-// --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    std::cout << "[System] World Exit. Resetting Logic (Hooks Persist)." << std::endl;
-
     // 1. Reset Pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
 
-    // 2. Clear Logic State (But DO NOT Disable Hooks)
-    // This stops the Race Condition. The hooks stay active but in "Pass-Through" mode.
+    // 2. Clear Logic State (Hooks stay enabled to prevent race conditions)
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
         g_HookedObjects.clear();
@@ -203,6 +190,7 @@ void PerformWorldExit() {
     Player::Reset();
 }
 
+// --- INPUT HANDLER ---
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
@@ -244,7 +232,7 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
             g_pParam = nullptr;
             g_bIsSafe = false;
         }
-        return false; // Return FALSE to allow execution to proceed (pass to original)
+        return false;
     }
 
     if (!Hooking::bFoundValidTraffic) {
@@ -280,14 +268,15 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. FAST VALIDATION (Prevent 0xFF Sentinel Crash)
-    // If invalid, DROP IT. Passing garbage to engine is fatal.
-    if (!FastValidateObject(pObject) || !FastValidateObject(pFunction)) {
+    // 1. STRICT VALIDATION [Prevents 0xFF Crash]
+    // Use IsValidObject which uses IsBadReadPtr.
+    // If memory is not readable (Zombie/Sentinel), DROP IT.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
     // 2. UNSAFE MODE (Transition / Menu)
-    // Pass everything through safely. No logic.
+    // Pass valid objects through without logic.
     if (!g_bIsSafe || !SDK::UWorld::GetWorld()) {
         __try { if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams); }
         __except (1) {}
@@ -295,7 +284,6 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     }
 
     // 3. WHITE-LIST FILTER
-    // If pointers are cleared (World Exit), this fails safely and passes through.
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         __try { if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams); }
         __except (1) {}
@@ -303,6 +291,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     }
 
     // 4. SAFE MODE (Gameplay)
+    // GetNameSafe is only called here (Safe Mode), preventing freeze.
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
 
@@ -320,7 +309,6 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         bBlock = false;
     }
 
-    // If logic says block, we return. Otherwise, pass to original.
     if (bBlock) return;
 
     __try {
@@ -356,7 +344,6 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
             std::cout << "[+] Hooked " << debugName << std::endl;
         }
         else if (status == MH_ERROR_ALREADY_CREATED) {
-            // If already created, ensure enabled (Wake Up)
             MH_EnableHook(pTarget);
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
@@ -368,7 +355,6 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
         }
     }
     else {
-        // Just ensure it's enabled (Wake Up)
         MH_EnableHook(pTarget);
     }
 
@@ -443,8 +429,6 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
-    // If latches are false (reset by exit), we try to hook.
-    // HookIndex handles duplicates gracefully now.
     if (g_bPawnHooked && g_bControllerHooked && g_bParamHooked) return;
 
     if (pLocal != g_LastLocalPlayer) {
@@ -469,6 +453,7 @@ void Present_Logic() {
     ULONGLONG CurrentTime = GetTickCount64();
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
 
+    // 1. DETECTION OF LEVEL TRANSITION
     if (!pLocal) {
         g_bIsSafe = false;
 
@@ -489,6 +474,7 @@ void Present_Logic() {
 
     g_TimePlayerLost = 0;
 
+    // 2. STABILIZATION
     if (g_TimePlayerDetected == 0) {
         g_TimePlayerDetected = CurrentTime;
         std::cout << "[System] Player detected. Stabilizing..." << std::endl;
@@ -498,6 +484,7 @@ void Present_Logic() {
         return;
     }
 
+    // 3. ACTIVE
     g_bIsSafe = true;
     AttachPlayerHooks_Logic();
 
