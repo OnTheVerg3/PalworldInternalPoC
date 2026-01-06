@@ -34,7 +34,6 @@ ULONGLONG g_TimePlayerLost = 0;
 std::atomic<bool> g_bIsSafe(false);
 
 // MODULE BOUNDS
-// Defined here, accessed via extern in Hooking.h
 uintptr_t g_GameBase = 0;
 uintptr_t g_GameSize = 0;
 
@@ -77,9 +76,8 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject moved to Hooking.h for inline strict validation
+// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
 
-// --- SAFE STRING HANDLING ---
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -101,7 +99,6 @@ void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     }
 }
 
-// --- UTILS ---
 bool RawStrContains(const char* haystack, const char* needle) {
     if (!haystack || !needle) return false;
     size_t hLen = strlen(haystack);
@@ -122,17 +119,21 @@ bool RawStrContains(const char* haystack, const char* needle) {
 }
 
 bool IsValidSignature(uintptr_t addr) {
-    if (!IsValidPtr((void*)addr)) return false;
-    unsigned char* b = (unsigned char*)addr;
-    if (b[0] == 0x40 && b[1] == 0x55 && b[2] == 0x56 && b[3] == 0x57) return true;
-    if (b[0] == 0x48 && b[1] == 0x89 && b[2] == 0x5C && b[3] == 0x24) return true;
-    if (b[0] == 0x4C && b[1] == 0x8B && b[2] == 0xDC) return true;
+    if (IsGarbagePtr((void*)addr)) return false;
+    __try {
+        unsigned char* b = (unsigned char*)addr;
+        if (b[0] == 0x40 && b[1] == 0x55 && b[2] == 0x56 && b[3] == 0x57) return true;
+        if (b[0] == 0x48 && b[1] == 0x89 && b[2] == 0x5C && b[3] == 0x24) return true;
+        if (b[0] == 0x4C && b[1] == 0x8B && b[2] == 0xDC) return true;
+    }
+    __except (1) { return false; }
     return false;
 }
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    std::cout << "[System] World Exit. Resetting State (Hooks Active)." << std::endl;
+    // [FIX] No console logging to avoid deadlocks
+    // [FIX] No disabling hooks to avoid race conditions
 
     g_pLocal = nullptr;
     g_pController = nullptr;
@@ -227,26 +228,31 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 
 // --- THE HOOK CALLBACK ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
-    // 1. FAST VALIDATION & BOUNDS CHECK [PRIORITY]
-    // If validation fails (garbage pointer or outside module), DROP IT.
-    // This prevents the 0x524ab8 (Heap VTable) crash.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
-    }
+    if (g_GameBase == 0) InitModuleBounds();
 
-    // 2. UNSAFE MODE (Transition / Menu)
-    // Check pGWorld pointer validity to prevent 0x8 crash
+    // 1. UNSAFE MODE (Transition / Menu) [PRIORITY 1]
+    // If we are in transition (g_bIsSafe == false), we MUST Pass-Through everything.
+    // The engine may send Sentinels (0xFF...) or Zombies during cleanup.
+    // We wrap this in a __try block to prevent the cheat from crashing the game if the engine faults.
+
     bool bWorldValid = false;
     __try {
-        if (SDK::pGWorld && *SDK::pGWorld) {
-            bWorldValid = true;
-        }
+        // Safe check for UWorld pointer
+        if (SDK::pGWorld && *SDK::pGWorld) bWorldValid = true;
     }
     __except (1) { bWorldValid = false; }
 
     if (!g_bIsSafe || !bWorldValid) {
-        __try { if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams); }
+        __try {
+            if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams);
+        }
         __except (1) {}
+        return;
+    }
+
+    // 2. STRICT VALIDATION [PRIORITY 2]
+    // If we are in-game, we Drop garbage.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
@@ -287,9 +293,9 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
     if (!IsValidObject(pObject)) return false;
     void** vtable = *reinterpret_cast<void***>(pObject);
-    if (!IsValidPtr(vtable)) return false;
+    if (!IsValidObject((SDK::UObject*)vtable)) return false; // Basic pointer check
     void* pTarget = vtable[index];
-    if (!IsValidPtr(pTarget)) return false;
+    if (IsGarbagePtr(pTarget)) return false;
 
     bool bAlreadyTracked = false;
     {
@@ -337,7 +343,8 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
 bool ScanAndHook(SDK::UObject* pObject, int startIdx, int endIdx, const char* debugName) {
     if (!IsValidObject(pObject)) return false;
     void** vtable = *reinterpret_cast<void***>(pObject);
-    if (!IsValidPtr(vtable)) return false;
+    // Bounds check vtable implicitly done by IsValidObject(pObject)
+
     int foundIndex = -1;
     for (int i = startIdx; i <= endIdx; i++) {
         if (i < 10) continue;
@@ -530,7 +537,7 @@ void Hooking::Init() {
         void* presentAddr = (void*)vtable[8];
         swap->Release(); dev->Release(); ctx->Release(); DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
         if (MH_Initialize() == MH_OK) {
-            InitModuleBounds(); // [CRITICAL] Init bounds before any hooking
+            InitModuleBounds();
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
             MH_EnableHook(MH_ALL_HOOKS);
         }
