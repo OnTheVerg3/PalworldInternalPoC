@@ -76,7 +76,7 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject and IsGarbagePtr are in Hooking.h
+// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
 
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
@@ -229,17 +229,13 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. GARBAGE FILTER (Universal) [FIX]
-    // We check this BEFORE checking Safe Mode.
-    // If it's a sentinel (0xFF) or null, we DROP it. Passing it crashes the engine.
+    // 1. GARBAGE FILTER
     if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
         return;
     }
 
     // 2. UNSAFE MODE (Pass-Through)
-    // If we are shutting down, pass the valid-looking pointer to the engine.
-    // We do NOT do strict validation here to avoid overhead/freezes.
-    // We do NOT use __try to avoid deadlocks.
+    // If not safe, just pass to engine. Don't touch.
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
@@ -249,8 +245,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. STRICT VALIDATION (Safe Mode Only)
-    // Now we check VTables and Bounds. If this fails, it's a Zombie -> DROP.
+    // 4. STRICT VALIDATION
     if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
@@ -493,7 +488,11 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
             if (g_ShowMenu) {
                 ImGui::GetIO().MouseDrawCursor = true;
-                Menu::Draw();
+
+                // [FIX] Prevents 0x8 crash (Menu accessing dead GObjects during shutdown)
+                if (g_bIsSafe) {
+                    Menu::Draw();
+                }
             }
             else {
                 ImGui::GetIO().MouseDrawCursor = false;
