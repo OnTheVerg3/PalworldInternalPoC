@@ -13,6 +13,7 @@
 #include <atomic>
 #include <mutex> 
 #include <psapi.h> 
+#include <thread> // Required for async unhooking
 
 #pragma comment(lib, "psapi.lib")
 
@@ -80,7 +81,7 @@ void InitModuleBounds() {
     }
 }
 
-// [FIX] NoInline to avoid C2712 (std::string destructor vs __try)
+// NoInline to avoid C2712
 __declspec(noinline) void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -134,7 +135,7 @@ bool IsValidSignature(uintptr_t addr) {
 }
 
 // --- CLEANUP HELPER ---
-// [FIX] NoInline + Manual Lock to avoid C2712
+// [FIX] NoInline + Manual Lock
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
@@ -145,6 +146,8 @@ __declspec(noinline) void PerformWorldExit() {
 
     g_HookMutex.lock();
 
+    // We clear the active hooks list, but we DO NOT disable them here synchronously.
+    // The Async thread handles the physical detach.
     g_ActiveHooks.clear();
     g_HookedObjects.clear();
     g_bPawnHooked = false;
@@ -161,11 +164,20 @@ __declspec(noinline) void PerformWorldExit() {
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    std::cout << "[Jarvis] World Exit Cleanup Complete. Entering Cooldown." << std::endl;
+    std::cout << "[Jarvis] World Exit Logic Reset. Async Detach Scheduled." << std::endl;
+
+    // [CRITICAL FIX] ASYNC UNHOOKING
+    // Spawn a thread to disable hooks after a short delay.
+    // This allows the current hook execution to finish safely (avoiding deadlock)
+    // and removes the hook entirely (avoiding crashes on zombie objects).
+    std::thread([]() {
+        Sleep(100); // Wait for current frame/hook to finish
+        MH_DisableHook(MH_ALL_HOOKS);
+        std::cout << "[Jarvis] Hooks physically disabled for safety." << std::endl;
+        }).detach();
 }
 
 // --- AUTO-DETACH HELPER ---
-// [FIX] NoInline to avoid C2712
 __declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
@@ -240,7 +252,6 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 }
 
 // [HARDENED] Strict VTable Check
-// [FIX] NoInline to avoid C2712
 __declspec(noinline) bool HasValidVTable(void* pObject) {
     __try {
         if (!pObject) return false;
@@ -263,20 +274,17 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         // 1. GARBAGE FILTER
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-        // 2. VTABLE SANITY (Zombie Filter)
+        // 2. VTABLE SANITY
         if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
-            return; // Drop Zombie
+            return;
         }
 
         // 3. UNSAFE MODE "BLIND PASS"
-        // Hands-Off approach: Trust the VTable check, pass everything else to engine.
+        // If unsafe, we pass execution immediately. 
+        // NOTE: The Async Unhook thread will soon disable this hook entirely.
         if (!g_bIsSafe) {
-            __try {
-                return oProcessEvent(pObject, pFunction, pParams);
-            }
-            __except (1) {
-                return; // Swallow crash
-            }
+            __try { return oProcessEvent(pObject, pFunction, pParams); }
+            __except (1) { return; }
         }
 
         // 4. WHITELIST OPTIMIZATION
@@ -330,6 +338,7 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
 
     if (!bAlreadyTracked) {
         MH_STATUS status = MH_CreateHook(pTarget, &hkProcessEvent, (void**)&oProcessEvent);
+        // If hook already created (from prev session), we just enable it
         if (status == MH_OK || status == MH_ERROR_ALREADY_CREATED) {
             MH_EnableHook(pTarget);
             {
@@ -343,6 +352,7 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
         }
     }
     else {
+        // [FIX] Ensure we re-enable if tracked but disabled
         MH_EnableHook(pTarget);
     }
 
@@ -529,7 +539,6 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
-            // [FIX] C2712: Replaced lock_guard with manual lock/unlock
             g_HookMutex.lock();
 
             if (g_bIsSafe) {
@@ -557,7 +566,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 }
             }
 
-            g_HookMutex.unlock(); // Manual unlock before ImGui::Render()
+            g_HookMutex.unlock();
 
             ImGui::Render();
             g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
