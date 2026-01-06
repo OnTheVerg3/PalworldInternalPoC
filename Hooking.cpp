@@ -160,6 +160,7 @@ bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
         if (pObject == g_pLocal) {
             std::cout << "[Jarvis] World Exit Detected. Detaching Hooks..." << std::endl;
 
+            // Disable hooks immediately
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
                 for (void* pHook : g_ActiveHooks) {
@@ -178,6 +179,7 @@ bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
+
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
@@ -240,28 +242,36 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. POINTER SANITY
+    // 1. GARBAGE FILTER [CRITICAL]
+    // We MUST filter 0xFF (Sentinel) and NULLs before anything else.
+    // Passing these to the engine causes the 0xFF crash.
     if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
         return;
     }
 
-    // 2. STRICT VALIDATION [CRITICAL FIX]
-    // We MUST validate the object BEFORE we do anything else.
-    // If we blindly pass a garbage pointer (like 0x3f...) to the engine, it crashes.
-    // This check filters out Zombies and Floats.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return; // Drop bad objects
+    // 2. VTABLE SANITY CHECK [Fixes Zombie Crash]
+    // Check if the VTable itself is garbage.
+    // NOTE: We do NOT use strict IsValidObject here because it blocks DLL objects (Freeze).
+    // We just ensure the pointer points to readable memory.
+    bool bVTableValid = false;
+    __try {
+        void* vtable = *(void**)pObject;
+        if (!IsGarbagePtr(vtable)) {
+            bVTableValid = true;
+        }
     }
+    __except (1) { bVTableValid = false; }
 
-    // 3. UNSAFE MODE PASS-THROUGH
-    // Now that we know the object is VALID, if we are in Unsafe Mode (Exit),
-    // we MUST pass it to the engine to allow cleanup (EndPlay/Destroy).
+    if (!bVTableValid) return; // Drop bad objects
+
+    // 3. UNSAFE BYPASS [Fixes Freeze]
+    // Now that we know the object is physically valid (not garbage),
+    // if we are in Unsafe Mode, we PASS it. This lets valid objects clean up.
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
     // 4. WHITELIST OPTIMIZATION
-    // If safe, only process our whitelisted objects. Pass others immediately.
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
@@ -271,7 +281,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     GetNameSafe(pFunction, name, sizeof(name));
     if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
 
-    // If we detect destruction, disable hooks and allow pass-through
+    // If we detect destruction, disable hooks, set Unsafe, and pass-through
     if (CheckAndPerformAutoDetach(pObject, name)) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
@@ -423,7 +433,6 @@ void Present_Logic() {
     ULONGLONG CurrentTime = GetTickCount64();
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
 
-    // 1. If player is missing or invalid -> UNSAFE.
     if (!pLocal || !IsValidObject(pLocal)) {
         g_bIsSafe = false;
 
@@ -453,7 +462,6 @@ void Present_Logic() {
         return;
     }
 
-    // 2. Player is Stable -> SAFE.
     g_bIsSafe = true;
     AttachPlayerHooks_Logic();
 
@@ -490,7 +498,6 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
-    // Execute Logic Check (Safety Wrapper)
     __try { Present_Logic(); }
     __except (EXCEPTION_EXECUTE_HANDLER) { g_bIsSafe = false; }
 
@@ -502,9 +509,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
             static bool bHasAutoOpened = false;
 
-            // [LOGIC] Only Draw Menu/Cursor when Safe (In-Game)
             if (g_bIsSafe) {
-                // Auto-Open on first load
                 if (!bHasAutoOpened) {
                     g_ShowMenu = true;
                     bHasAutoOpened = true;
@@ -519,12 +524,9 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 }
             }
             else {
-                // Not Safe (Menu/Loading)
                 bHasAutoOpened = false;
                 ImGui::GetIO().MouseDrawCursor = false;
 
-                // Simple "Jarvis" Text Overlay
-                // Only draw if GObjects pointer itself isn't garbage
                 if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
                     ImGui::SetNextWindowPos(ImVec2(10, 10));
                     ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
