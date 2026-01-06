@@ -4,7 +4,7 @@
 #include <dxgi.h>
 #include <vector>
 #include <cstdint>
-#include <atomic> // [FIX] Required for std::atomic
+#include <atomic> 
 #include "SDKGlobal.h"
 #include "VMTHook.h" 
 
@@ -12,8 +12,7 @@
 extern uintptr_t g_GameBase;
 extern uintptr_t g_GameSize;
 
-// --- SHARED GLOBALS [FIX] ---
-// These allow Menu.cpp, Features.cpp, and Player.cpp to see the variables defined in Hooking.cpp
+// --- SHARED GLOBALS ---
 extern std::atomic<bool> g_bIsSafe;
 extern SDK::APalPlayerCharacter* g_pLocal;
 
@@ -34,14 +33,15 @@ inline bool IsValidObject(SDK::UObject* pObj) {
     __try {
         void** vtablePtr = reinterpret_cast<void**>(pObj);
         void* vtable = *vtablePtr;
+
+        // [FIX] Use IsGarbagePtr only. 
+        // Do NOT check if vtable is inside g_GameBase module.
+        // VMT Hooks move the vtable to the Heap, which is outside the module.
         if (IsGarbagePtr(vtable)) return false;
-        if (g_GameBase != 0 && g_GameSize != 0) {
-            uintptr_t vtAddr = (uintptr_t)vtable;
-            if (vtAddr < g_GameBase || vtAddr >(g_GameBase + g_GameSize)) return false;
-        }
+
+        return true;
     }
     __except (1) { return false; }
-    return true;
 }
 
 void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size);
