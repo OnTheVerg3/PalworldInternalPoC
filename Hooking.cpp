@@ -134,7 +134,6 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    // Soft Detach: Stop all logic, release pointers.
     g_bIsSafe = false;
 
     g_pLocal = nullptr;
@@ -143,14 +142,12 @@ void PerformWorldExit() {
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
-        // We do NOT disable hooks via MinHook to avoid deadlocks.
-        // We just clear our tracking so we know to re-hook later.
         g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
         g_bControllerHooked = false;
         g_bParamHooked = false;
-        g_LastLocalPlayer = nullptr;
+        g_LastLocalPlayer = nullptr; // Reset tracking so we know we exited
     }
 
     Features::Reset();
@@ -177,8 +174,6 @@ bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
-
-        // Only capture mouse if In-Game. 
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
@@ -241,62 +236,60 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. GARBAGE FILTER [ABSOLUTE PRIORITY]
-    // Filter out 0xFF (Sentinel) and NULLs.
-    // If we pass these to oProcessEvent, it WILL crash.
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
-        return;
-    }
+    __try {
+        // 1. GARBAGE FILTER
+        if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
+            return;
+        }
 
-    // 2. UNSAFE MODE "TRY-PASS" [CRITICAL FIX]
-    // If not Safe (Exit Mode), we pass execution to the engine.
-    // BUT we wrap it in a try-catch.
-    // If the object is valid -> It runs (No Freeze).
-    // If the object is Zombie/Bad -> It crashes -> We Catch -> Return (No Crash).
-    if (!g_bIsSafe) {
-        __try {
+        // 2. UNSAFE MODE "TRY-PASS"
+        if (!g_bIsSafe) {
+            __try {
+                return oProcessEvent(pObject, pFunction, pParams);
+            }
+            __except (1) {
+                // If it crashes here, the object was dead. We just drop it.
+                return;
+            }
+        }
+
+        // 3. WHITELIST OPTIMIZATION
+        if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
             return oProcessEvent(pObject, pFunction, pParams);
         }
-        __except (1) {
-            return; // Swallow the 0xFF crash
-        }
-    }
 
-    // 3. WHITELIST OPTIMIZATION
-    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
+        // 4. VTABLE SANITY
+        if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+            return;
+        }
+
+        // 5. GET NAME & CHECK FOR EXIT
+        char name[256];
+        GetNameSafe(pFunction, name, sizeof(name));
+        if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
+
+        if (CheckAndPerformAutoDetach(pObject, name)) {
+            __try { return oProcessEvent(pObject, pFunction, pParams); }
+            __except (1) { return; }
+        }
+
+        // 6. CHEAT LOGIC
+        bool bBlock = false;
+        __try {
+            bBlock = ProcessEvent_Logic(pObject, pFunction, name);
+        }
+        __except (1) { bBlock = false; }
+
+        if (bBlock) return;
+
         return oProcessEvent(pObject, pFunction, pParams);
     }
-
-    // 4. VTABLE SANITY (Safe Mode Only)
-    // In-game, we can be strict to prevent reading garbage names.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // [CRITICAL FIX]
+        // If our logic crashed, it means the object is dangerous. 
+        // DO NOT pass it to the engine. DROP IT.
         return;
     }
-
-    // 5. GET NAME & CHECK FOR EXIT
-    char name[256];
-    GetNameSafe(pFunction, name, sizeof(name));
-    if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
-
-    // If we detect destruction, trigger Soft Detach
-    if (CheckAndPerformAutoDetach(pObject, name)) {
-        // Pass the exit signal safely
-        __try { return oProcessEvent(pObject, pFunction, pParams); }
-        __except (1) { return; }
-    }
-
-    // 6. CHEAT LOGIC (Only runs if Safe)
-    bool bBlock = false;
-    __try {
-        bBlock = ProcessEvent_Logic(pObject, pFunction, name);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        bBlock = false;
-    }
-
-    if (bBlock) return;
-
-    return oProcessEvent(pObject, pFunction, pParams);
 }
 
 // --- HOOKING HELPERS ---
@@ -404,12 +397,13 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
-    // Reset caches if player changed (New World Load)
+    // [FIX] FORCE RESET ON PLAYER CHANGE
+    // Even if g_LastLocalPlayer was nullptr (from exit), we MUST reset Features cache.
+    // This fixes the crash on 2nd world join caused by stale pointers.
     if (pLocal != g_LastLocalPlayer) {
-        if (g_LastLocalPlayer != nullptr) {
-            Features::Reset();
-            Player::Reset();
-        }
+        std::cout << "[System] New Player Detected. Flushing Caches." << std::endl;
+        Features::Reset();
+        Player::Reset();
         g_LastLocalPlayer = pLocal;
     }
 
