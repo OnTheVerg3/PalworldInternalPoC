@@ -154,22 +154,40 @@ void PerformWorldExit() {
     Player::Reset();
 }
 
+// --- AUTO-DETACH HELPER (FIXES C2712) ---
+// Extracted to separate C++ object unwinding (lock_guard) from SEH (__try)
+bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
+    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
+        if (pObject == g_pLocal) {
+            std::cout << "[Jarvis] World Exit Detected. Detaching Hooks..." << std::endl;
+
+            // Disable hooks safely using RAII lock
+            {
+                std::lock_guard<std::mutex> lock(g_HookMutex);
+                for (void* pHook : g_ActiveHooks) {
+                    MH_DisableHook(pHook);
+                }
+            }
+
+            PerformWorldExit();
+            return true;
+        }
+    }
+    return false;
+}
+
 // --- INPUT HANDLER ---
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
 
-        // Update Cursor immediately to feel responsive
-        if (g_pd3dDevice && g_bIsSafe) { // Only force cursor if in-game
+        if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
         }
         return 0;
     }
 
-    // [FIX] Main Menu Input Logic
-    // We only block input if the menu is Open AND we are In-Game (Safe).
-    // If we are in the Main Menu (!g_bIsSafe), we pass input through so you can click buttons.
     if (g_ShowMenu && g_bIsSafe) {
         if (g_pd3dDevice) {
             ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
@@ -184,11 +202,9 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         case WM_KEYDOWN: case WM_KEYUP:
         case WM_SYSKEYDOWN: case WM_SYSKEYUP:
         case WM_CHAR:
-            return 1; // Block Game Input
+            return 1;
         }
     }
-
-    // Pass to Game
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
@@ -235,19 +251,9 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     GetNameSafe(pFunction, name, sizeof(name));
     if (name[0] == '\0') return;
 
-    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
-        if (pObject == g_pLocal) {
-            // [JARVIS] Auto-Detach Logic
-            // Unload hooks before the world dies to prevent race conditions.
-            {
-                std::lock_guard<std::mutex> lock(g_HookMutex);
-                for (void* pHook : g_ActiveHooks) {
-                    MH_DisableHook(pHook);
-                }
-            }
-            PerformWorldExit();
-            return oProcessEvent(pObject, pFunction, pParams);
-        }
+    // [FIX] Auto-Detach Logic moved to helper to avoid C2712
+    if (CheckAndPerformAutoDetach(pObject, name)) {
+        return oProcessEvent(pObject, pFunction, pParams);
     }
 
     if (!g_bIsSafe) {
@@ -477,12 +483,9 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
-            // [FIX] Auto-Open Menu Latch
-            // Resets every time you leave the world so it re-opens next join
             static bool bHasAutoOpened = false;
 
             if (g_bIsSafe) {
-                // We are In-Game
                 if (!bHasAutoOpened) {
                     g_ShowMenu = true;
                     bHasAutoOpened = true;
@@ -497,11 +500,9 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 }
             }
             else {
-                // We are in Main Menu / Loading
-                bHasAutoOpened = false; // Reset Latch
-                ImGui::GetIO().MouseDrawCursor = false; // Never capture mouse here
+                bHasAutoOpened = false;
+                ImGui::GetIO().MouseDrawCursor = false;
 
-                // Draw Overlay (Always visible)
                 if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
                     ImGui::SetNextWindowPos(ImVec2(10, 10));
                     ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
