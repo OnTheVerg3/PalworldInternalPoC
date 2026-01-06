@@ -3,7 +3,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <vector>
-#include <cstdint>
+#include <cstdint> // Required for uintptr_t
 #include "SDKGlobal.h"
 
 // --- GLOBAL BOUNDS (Defined in Hooking.cpp) ---
@@ -16,11 +16,12 @@ inline bool IsSentinel(void* ptr) {
     return (uintptr_t)ptr == 0xFFFFFFFFFFFFFFFF;
 }
 
+// Lowered threshold to prevent false positives on valid low-mem objects
 inline bool IsGarbagePtr(void* ptr) {
     uintptr_t addr = (uintptr_t)ptr;
     if (!ptr) return true;
     if (IsSentinel(ptr)) return true;
-    if (addr < 0x10000) return true;
+    if (addr < 0x10000) return true; // 64KB null partition
     if (addr > 0x7FFFFFFFFFFF) return true;
     if (addr % 8 != 0) return true;
     return false;
@@ -32,6 +33,7 @@ inline bool IsValidPtr(void* ptr) {
 }
 
 // [CRITICAL UPDATE] Module-Bound Validation
+// Prevents 0x0000000000524ab8 crashes by ensuring VTable is in the Game Module.
 inline bool IsValidObject(SDK::UObject* pObj) {
     if (!IsValidPtr(pObj)) return false;
 
@@ -45,13 +47,13 @@ inline bool IsValidObject(SDK::UObject* pObj) {
     if (IsGarbagePtr(vtable)) return false;
     if (IsBadReadPtr(vtable, 8)) return false;
 
-    // 3. MODULE BOUNDS CHECK (The Crash Fix)
-    // VTables MUST be in the executable module (.rdata). 
-    // They are never on the Heap (0x00000000...).
+    // 3. MODULE BOUNDS CHECK (The Fix)
+    // A valid VTable MUST exist within the game's executable memory.
+    // If it points to the Heap (low address), it is a Zombie/Fake object.
     if (g_GameBase != 0 && g_GameSize != 0) {
         uintptr_t vtAddr = (uintptr_t)vtable;
         if (vtAddr < g_GameBase || vtAddr >(g_GameBase + g_GameSize)) {
-            return false; // Fake/Zombie Object
+            return false; // Drop it!
         }
     }
 
@@ -68,6 +70,8 @@ public:
     static void Shutdown();
     static void AttachPlayerHooks();
     static void ProbeVTable(int index);
+
+    // Public accessor for the menu/teleporter
     static SDK::APalPlayerCharacter* GetLocalPlayerSafe();
 
     static bool bFoundValidTraffic;

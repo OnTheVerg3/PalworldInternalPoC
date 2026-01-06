@@ -34,7 +34,7 @@ ULONGLONG g_TimePlayerLost = 0;
 std::atomic<bool> g_bIsSafe(false);
 
 // MODULE BOUNDS
-// Accessed via extern in Hooking.h
+// Defined here, accessed via extern in Hooking.h
 uintptr_t g_GameBase = 0;
 uintptr_t g_GameSize = 0;
 
@@ -79,6 +79,7 @@ void InitModuleBounds() {
 
 // NOTE: IsValidObject moved to Hooking.h for inline strict validation
 
+// --- SAFE STRING HANDLING ---
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -100,6 +101,7 @@ void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     }
 }
 
+// --- UTILS ---
 bool RawStrContains(const char* haystack, const char* needle) {
     if (!haystack || !needle) return false;
     size_t hLen = strlen(haystack);
@@ -130,7 +132,7 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    // Removed console logging to prevent Render/Game thread race condition on std::cout
+    std::cout << "[System] World Exit. Resetting State (Hooks Active)." << std::endl;
 
     g_pLocal = nullptr;
     g_pController = nullptr;
@@ -225,12 +227,11 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 
 // --- THE HOOK CALLBACK ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
-    if (g_GameBase == 0) InitModuleBounds();
-
-    // 1. STRICT VALIDATION [PRIORITY]
-    // Now checks MODULE BOUNDS. Rejects 0x3d... pointers.
+    // 1. FAST VALIDATION & BOUNDS CHECK [PRIORITY]
+    // If validation fails (garbage pointer or outside module), DROP IT.
+    // This prevents the 0x524ab8 (Heap VTable) crash.
     if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return; // Drop!
+        return;
     }
 
     // 2. UNSAFE MODE (Transition / Menu)
@@ -346,36 +347,35 @@ bool ScanAndHook(SDK::UObject* pObject, int startIdx, int endIdx, const char* de
     return false;
 }
 
-// --- ROBUST PLAYER RETRIEVAL ---
 SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
     __try {
         if (!SDK::pGWorld || !*SDK::pGWorld) return nullptr;
 
         SDK::UWorld* pWorld = *SDK::pGWorld;
-        if (!IsValidPtr(pWorld)) return nullptr;
-        if (!IsValidPtr(pWorld->PersistentLevel)) return nullptr;
+        if (!IsValidObject(pWorld)) return nullptr;
+        if (!IsValidObject(pWorld->PersistentLevel)) return nullptr;
 
         SDK::UGameInstance* pGI = pWorld->OwningGameInstance;
-        if (!IsValidPtr(pGI)) return nullptr;
+        if (!IsValidObject(pGI)) return nullptr;
         if (pGI->LocalPlayers.Num() <= 0) return nullptr;
 
         SDK::ULocalPlayer* pLocalPlayer = pGI->LocalPlayers[0];
-        if (!IsValidPtr(pLocalPlayer)) return nullptr;
+        if (!IsValidObject(pLocalPlayer)) return nullptr;
 
         SDK::APlayerController* pPC = pLocalPlayer->PlayerController;
-        if (!IsValidPtr(pPC)) return nullptr;
+        if (!IsValidObject(pPC)) return nullptr;
 
         SDK::APawn* pPawn = pPC->Pawn;
         if (IsGarbagePtr(pPawn)) return nullptr;
-        if (!IsValidPtr(pPawn)) return nullptr;
+        if (!IsValidObject(pPawn)) return nullptr;
 
         char nameBuf[256];
         GetNameSafe(pPawn, nameBuf, sizeof(nameBuf));
         if (!RawStrContains(nameBuf, "Player") && !RawStrContains(nameBuf, "Character")) return nullptr;
 
         SDK::APalPlayerCharacter* pPalChar = static_cast<SDK::APalPlayerCharacter*>(pPawn);
-        if (!IsValidPtr(pPalChar->CharacterParameterComponent)) return nullptr;
-        if (!IsValidPtr(pPC->PlayerState)) return nullptr;
+        if (!IsValidObject(pPalChar->CharacterParameterComponent)) return nullptr;
+        if (!IsValidObject(pPC->PlayerState)) return nullptr;
 
         return pPalChar;
     }
@@ -390,7 +390,7 @@ SDK::APalPlayerCharacter* Hooking::GetLocalPlayerSafe() {
 
 void AttachPlayerHooks_Logic() {
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
-    if (!IsValidPtr(pLocal)) return;
+    if (!IsValidObject(pLocal)) return;
 
     g_pLocal = pLocal;
     g_pController = pLocal->Controller;
@@ -406,16 +406,15 @@ void AttachPlayerHooks_Logic() {
         if (HookIndex(pLocal, 67, "Pawn")) g_bPawnHooked = true;
     }
 
-    if (!g_bControllerHooked && pLocal->Controller && IsValidPtr(pLocal->Controller)) {
+    if (!g_bControllerHooked && pLocal->Controller && IsValidObject(pLocal->Controller)) {
         if (ScanAndHook(pLocal->Controller, 10, 175, "Controller")) g_bControllerHooked = true;
     }
 
-    if (!g_bParamHooked && pLocal->CharacterParameterComponent && IsValidPtr(pLocal->CharacterParameterComponent)) {
+    if (!g_bParamHooked && pLocal->CharacterParameterComponent && IsValidObject(pLocal->CharacterParameterComponent)) {
         if (HookIndex(pLocal->CharacterParameterComponent, 76, "ParamComp")) g_bParamHooked = true;
     }
 }
 
-// --- SAFE FRAME LOGIC ---
 void Present_Logic() {
     ULONGLONG CurrentTime = GetTickCount64();
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
@@ -531,8 +530,7 @@ void Hooking::Init() {
         void* presentAddr = (void*)vtable[8];
         swap->Release(); dev->Release(); ctx->Release(); DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
         if (MH_Initialize() == MH_OK) {
-            // [FIX] Initialize module bounds immediately so checking logic works
-            InitModuleBounds();
+            InitModuleBounds(); // [CRITICAL] Init bounds before any hooking
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
             MH_EnableHook(MH_ALL_HOOKS);
         }
