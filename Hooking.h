@@ -3,22 +3,24 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <vector>
-#include <cstdint> // Required for uintptr_t
+#include <cstdint>
 #include "SDKGlobal.h"
 
+// --- GLOBAL BOUNDS (Defined in Hooking.cpp) ---
+extern uintptr_t g_GameBase;
+extern uintptr_t g_GameSize;
+
 // --- MEMORY SAFETY INTERFACE (INLINE) ---
-// Defined in header to prevent Linker Errors (LNK2001) in Player/Teleporter modules
 
 inline bool IsSentinel(void* ptr) {
     return (uintptr_t)ptr == 0xFFFFFFFFFFFFFFFF;
 }
 
-// Lowered threshold to prevent false positives on valid low-mem objects
 inline bool IsGarbagePtr(void* ptr) {
     uintptr_t addr = (uintptr_t)ptr;
     if (!ptr) return true;
     if (IsSentinel(ptr)) return true;
-    if (addr < 0x10000) return true; // 64KB null partition
+    if (addr < 0x10000) return true;
     if (addr > 0x7FFFFFFFFFFF) return true;
     if (addr % 8 != 0) return true;
     return false;
@@ -29,18 +31,29 @@ inline bool IsValidPtr(void* ptr) {
     return !IsBadReadPtr(ptr, 8);
 }
 
-// Check if memory is valid before reading it
-// Now inline to resolve external symbol errors
+// [CRITICAL UPDATE] Module-Bound Validation
 inline bool IsValidObject(SDK::UObject* pObj) {
     if (!IsValidPtr(pObj)) return false;
 
-    // Validate VTable Pointer
+    // 1. Read VTable Pointer
     void** vtablePtr = reinterpret_cast<void**>(pObj);
     if (IsBadReadPtr(vtablePtr, 8)) return false;
 
     void* vtable = *vtablePtr;
+
+    // 2. Garbage Check
     if (IsGarbagePtr(vtable)) return false;
     if (IsBadReadPtr(vtable, 8)) return false;
+
+    // 3. MODULE BOUNDS CHECK (The Crash Fix)
+    // VTables MUST be in the executable module (.rdata). 
+    // They are never on the Heap (0x00000000...).
+    if (g_GameBase != 0 && g_GameSize != 0) {
+        uintptr_t vtAddr = (uintptr_t)vtable;
+        if (vtAddr < g_GameBase || vtAddr >(g_GameBase + g_GameSize)) {
+            return false; // Fake/Zombie Object
+        }
+    }
 
     return true;
 }
@@ -55,8 +68,6 @@ public:
     static void Shutdown();
     static void AttachPlayerHooks();
     static void ProbeVTable(int index);
-
-    // Public accessor for the menu/teleporter
     static SDK::APalPlayerCharacter* GetLocalPlayerSafe();
 
     static bool bFoundValidTraffic;

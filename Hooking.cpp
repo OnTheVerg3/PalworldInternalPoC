@@ -34,6 +34,7 @@ ULONGLONG g_TimePlayerLost = 0;
 std::atomic<bool> g_bIsSafe(false);
 
 // MODULE BOUNDS
+// Accessed via extern in Hooking.h
 uintptr_t g_GameBase = 0;
 uintptr_t g_GameSize = 0;
 
@@ -76,9 +77,8 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject, IsSentinel, etc. moved to Hooking.h (inline)
+// NOTE: IsValidObject moved to Hooking.h for inline strict validation
 
-// --- SAFE STRING HANDLING ---
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -91,7 +91,7 @@ void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
 
 void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     memset(outBuf, 0, size);
-    if (!IsValidObject(pObject)) return; // Uses inline header check
+    if (!IsValidObject(pObject)) return;
     __try {
         GetNameInternal(pObject, outBuf, size);
     }
@@ -100,7 +100,6 @@ void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     }
 }
 
-// --- UTILS ---
 bool RawStrContains(const char* haystack, const char* needle) {
     if (!haystack || !needle) return false;
     size_t hLen = strlen(haystack);
@@ -131,7 +130,7 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    std::cout << "[System] World Exit. Resetting State (Hooks Active)." << std::endl;
+    // Removed console logging to prevent Render/Game thread race condition on std::cout
 
     g_pLocal = nullptr;
     g_pController = nullptr;
@@ -229,13 +228,13 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     if (g_GameBase == 0) InitModuleBounds();
 
     // 1. STRICT VALIDATION [PRIORITY]
-    // Validates memory is readable. Prevents 0xFF Sentinel Crash.
+    // Now checks MODULE BOUNDS. Rejects 0x3d... pointers.
     if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
+        return; // Drop!
     }
 
-    // 2. UNSAFE MODE (Transition / Menu) [FIX]
-    // Replaced GetWorld() call with direct pointer checks to prevent 0x8 crash.
+    // 2. UNSAFE MODE (Transition / Menu)
+    // Check pGWorld pointer validity to prevent 0x8 crash
     bool bWorldValid = false;
     __try {
         if (SDK::pGWorld && *SDK::pGWorld) {
@@ -367,7 +366,6 @@ SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
         if (!IsValidPtr(pPC)) return nullptr;
 
         SDK::APawn* pPawn = pPC->Pawn;
-        // Strict Garbage check for Pawn
         if (IsGarbagePtr(pPawn)) return nullptr;
         if (!IsValidPtr(pPawn)) return nullptr;
 
@@ -533,6 +531,8 @@ void Hooking::Init() {
         void* presentAddr = (void*)vtable[8];
         swap->Release(); dev->Release(); ctx->Release(); DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
         if (MH_Initialize() == MH_OK) {
+            // [FIX] Initialize module bounds immediately so checking logic works
+            InitModuleBounds();
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
             MH_EnableHook(MH_ALL_HOOKS);
         }
