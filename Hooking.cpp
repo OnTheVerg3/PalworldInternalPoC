@@ -133,7 +133,7 @@ bool IsValidSignature(uintptr_t addr) {
 }
 
 // --- CLEANUP HELPER ---
-// [FIX] NoInline to prevent SEH conflict
+// NoInline to prevent SEH conflict
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
@@ -142,7 +142,7 @@ __declspec(noinline) void PerformWorldExit() {
     g_pController = nullptr;
     g_pParam = nullptr;
 
-    // [FIX] Lock extended to cover Reset calls to prevent Race Condition with Render Thread
+    // Lock to ensure atomic reset vs Render Thread
     g_HookMutex.lock();
 
     g_ActiveHooks.clear();
@@ -152,7 +152,6 @@ __declspec(noinline) void PerformWorldExit() {
     g_bParamHooked = false;
     g_LastLocalPlayer = nullptr;
 
-    // Resets MUST happen inside lock so Update() doesn't read clearing vectors
     Features::Reset();
     Player::Reset();
     Menu::Reset();
@@ -166,7 +165,7 @@ __declspec(noinline) void PerformWorldExit() {
 }
 
 // --- AUTO-DETACH HELPER ---
-// [FIX] NoInline to prevent SEH conflict
+// NoInline to prevent SEH conflict
 __declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
@@ -241,15 +240,15 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 }
 
 // [HARDENED] Strict VTable Check
-// [FIX] NoInline to be safe
+// NoInline to be safe
 __declspec(noinline) bool HasValidVTable(void* pObject) {
     __try {
         if (!pObject) return false;
         void* vtable = *(void**)pObject;
 
         if (IsGarbagePtr(vtable)) return false;
-        if ((uintptr_t)vtable < 0x10000000) return false;
-        if ((uintptr_t)vtable % 8 != 0) return false;
+        if ((uintptr_t)vtable < 0x10000000) return false; // 256MB Threshold
+        if ((uintptr_t)vtable % 8 != 0) return false; // Alignment
 
         return true;
     }
@@ -264,12 +263,14 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         // 1. GARBAGE FILTER
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-        // 2. VTABLE SANITY
+        // 2. VTABLE SANITY (Zombie Filter)
         if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
-            return; // Drop Zombie
+            return;
         }
 
         // 3. UNSAFE MODE "BLIND PASS"
+        // If unsafe, we pass everything VALID to the engine blindly.
+        // We TRUST the VTable check above to catch the garbage.
         if (!g_bIsSafe) {
             __try {
                 return oProcessEvent(pObject, pFunction, pParams);
@@ -420,7 +421,6 @@ void AttachPlayerHooks_Logic() {
     if (pLocal != g_LastLocalPlayer) {
         std::cout << "[System] New Player Detected. Flushing Caches." << std::endl;
 
-        // Manual lock here too just in case
         g_HookMutex.lock();
         Features::Reset();
         Player::Reset();
@@ -486,7 +486,6 @@ void Present_Logic() {
     g_bIsSafe = true;
     AttachPlayerHooks_Logic();
 
-    // Lock updates to prevent race with Reset
     g_HookMutex.lock();
     __try { Features::RunLoop(); }
     __except (1) {}
@@ -531,28 +530,33 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
-            if (g_bIsSafe) {
-                if (!g_bHasAutoOpened) {
-                    g_ShowMenu = true;
-                    g_bHasAutoOpened = true;
-                }
+            // [FIX] CRITICAL SECTION: Lock UI Logic to prevent drawing while Reset happens
+            {
+                std::lock_guard<std::mutex> lock(g_HookMutex);
 
-                if (g_ShowMenu) {
-                    ImGui::GetIO().MouseDrawCursor = true;
-                    Menu::Draw();
+                if (g_bIsSafe) {
+                    if (!g_bHasAutoOpened) {
+                        g_ShowMenu = true;
+                        g_bHasAutoOpened = true;
+                    }
+
+                    if (g_ShowMenu) {
+                        ImGui::GetIO().MouseDrawCursor = true;
+                        Menu::Draw();
+                    }
+                    else {
+                        ImGui::GetIO().MouseDrawCursor = false;
+                    }
                 }
                 else {
                     ImGui::GetIO().MouseDrawCursor = false;
-                }
-            }
-            else {
-                ImGui::GetIO().MouseDrawCursor = false;
 
-                if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
-                    ImGui::SetNextWindowPos(ImVec2(10, 10));
-                    ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-                    ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
-                    ImGui::End();
+                    if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
+                        ImGui::SetNextWindowPos(ImVec2(10, 10));
+                        ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
+                        ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
+                        ImGui::End();
+                    }
                 }
             }
 
