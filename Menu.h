@@ -7,4 +7,7 @@ namespace Menu {
 
     // Main Draw Function
     void Draw();
+
+    // [NEW] Resets Menu State (Tabs)
+    void Reset();
 }

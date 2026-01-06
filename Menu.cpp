@@ -3,19 +3,25 @@
 #include "Hooking.h"
 #include "ItemSpawner.h"
 #include "Player.h"
-#include "Teleporter.h" // Required for Teleporter module
+#include "Teleporter.h"
 #include "SDKGlobal.h"
 #include "imgui_style.h"
 
 SDK::APalPlayerCharacter* g_pLocal = nullptr;
 
+// Static internal state
+static int selectedTab = 0;
+
 void Menu::InitTheme() {
     SetupImGuiStyle();
 }
 
+// [NEW] Reset Implementation
+void Menu::Reset() {
+    selectedTab = 0;
+}
+
 void Menu::Draw() {
-    static int selectedTab = 0;
-    // [UPDATE] Added "Teleporter" to the list
     const char* menuItems[] = { "Player", "Weapons", "Visuals", "Spawner", "Teleporter", "Settings" };
 
     ImGui::SetNextWindowSize(ImVec2(750, 500), ImGuiCond_FirstUseEver);
@@ -112,9 +118,7 @@ void Menu::Draw() {
             break;
 
         case 4: // TELEPORTER
-        {   // [FIX] Scoping Block Started (Fixes C2360)
-
-            // Get Safe Pointer for UI actions
+        {
             auto pLocal = Hooking::GetLocalPlayerSafe();
 
             ColoredSeparatorText("Custom Waypoints", ImVec4(0.3f, 1.0f, 1.0f, 1));
@@ -129,7 +133,6 @@ void Menu::Draw() {
             ImGui::Spacing();
             ColoredSeparatorText("Saved Locations", ImVec4(1, 1, 1, 1));
 
-            // List Waypoints
             for (int i = 0; i < Teleporter::Waypoints.size(); ++i) {
                 ImGui::PushID(i);
 
@@ -155,14 +158,13 @@ void Menu::Draw() {
             ImGui::SameLine();
             if (ImGui::Button("Lily & Lyleen")) { if (pLocal) Teleporter::TeleportToBoss(pLocal, 1); }
 
-        }   // [FIX] Scoping Block Ended
+        }
         break;
 
         case 5: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
             ImGui::Text("Version 2.8 (Jarvis)");
             if (ImGui::Button("Unload Cheat")) {
-                // Unload Logic
                 Hooking::Shutdown();
             }
             break;

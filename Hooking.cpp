@@ -30,6 +30,7 @@ SDK::UObject* g_pParam = nullptr;
 // Time-Based Latches
 ULONGLONG g_TimePlayerDetected = 0;
 ULONGLONG g_TimePlayerLost = 0;
+ULONGLONG g_ExitCooldown = 0; // [NEW] Cooldown to prevent hooking too fast on re-join
 
 std::atomic<bool> g_bIsSafe(false);
 
@@ -52,8 +53,9 @@ ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 HWND g_window = nullptr;
 
-// Default false so main menu is clickable immediately
+// UI STATE
 bool g_ShowMenu = false;
+bool g_bHasAutoOpened = false; // [MOVED] To Global so we can reset it
 
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 Present oPresent;
@@ -77,8 +79,6 @@ void InitModuleBounds() {
         g_GameSize = (uintptr_t)mi.SizeOfImage;
     }
 }
-
-// NOTE: IsValidObject and IsGarbagePtr are in Hooking.h (inline)
 
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
@@ -134,17 +134,20 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    // Soft Detach: Stop all logic, release pointers.
+    // 1. Force Unsafe Mode
     g_bIsSafe = false;
 
+    // 2. Set Cooldown (Block logic for 3 seconds to clear old memory)
+    g_ExitCooldown = GetTickCount64() + 3000;
+
+    // 3. Clear Pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
-        // Do NOT disable hooks via MinHook (prevents deadlock).
-        // Clear tracking so we know to re-verify later.
+        // Clear tracking to force re-evaluation on next join
         g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
@@ -153,8 +156,16 @@ void PerformWorldExit() {
         g_LastLocalPlayer = nullptr;
     }
 
+    // 4. Reset ALL Subsystems
     Features::Reset();
     Player::Reset();
+    Menu::Reset(); // [NEW] Reset Menu State (Tabs)
+
+    // 5. Reset UI State
+    g_ShowMenu = false;
+    g_bHasAutoOpened = false;
+
+    std::cout << "[Jarvis] World Exit Cleanup Complete. Cooldown Active." << std::endl;
 }
 
 // --- AUTO-DETACH HELPER ---
@@ -165,7 +176,7 @@ bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
         RawStrContains(name, "ClientTravel"))
     {
         if (pObject == g_pLocal || pObject == g_pController) {
-            std::cout << "[Jarvis] World Exit Confirmed via: " << name << ". Soft Detach Engaged." << std::endl;
+            std::cout << "[Jarvis] Exit Trigger: " << name << ". Soft Detach." << std::endl;
             PerformWorldExit();
             return true;
         }
@@ -213,11 +224,7 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     }
 
     if (Features::bInfiniteDurability) {
-        if (RawStrContains(name, "UpdateDurability") ||
-            RawStrContains(name, "Deterioration") ||
-            RawStrContains(name, "Broken")) {
-            return true;
-        }
+        if (RawStrContains(name, "UpdateDurability") || RawStrContains(name, "Deterioration") || RawStrContains(name, "Broken")) return true;
     }
 
     if (Features::bInfiniteAmmo) {
@@ -235,18 +242,12 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     return false;
 }
 
-// Helper: Lightweight VTable Check (Fixes 0xFF crash without freezing on DLLs)
 bool HasValidVTable(void* pObject) {
     __try {
         if (!pObject) return false;
         void* vtable = *(void**)pObject;
-
-        // Garbage Filter: Check alignment, range, and sentinel values
         if (IsGarbagePtr(vtable)) return false;
-
-        // Low-Address Filter: Catches floats/ints treated as pointers
         if ((uintptr_t)vtable < 0x10000) return false;
-
         return true;
     }
     __except (1) { return false; }
@@ -257,36 +258,25 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     if (g_GameBase == 0) InitModuleBounds();
 
     __try {
-        // 1. GARBAGE FILTER (Pointer Itself)
-        if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
-            return; // Drop bad pointers
-        }
+        // 1. GARBAGE FILTER
+        if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-        // 2. VTABLE SANITY CHECK [CRITICAL FIX]
-        // Check BOTH Object and Function. If Function is a zombie, we crash inside.
-        if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
-            return; // Drop Zombie Objects
-        }
+        // 2. VTABLE SANITY
+        if (!HasValidVTable(pObject)) return;
 
-        // 3. UNSAFE MODE "TRY-PASS" [CRITICAL FIX]
-        // If exiting, we pass everything VALID to the engine.
-        // We wrap it in a try-catch so if the engine crashes, we swallow it.
+        // 3. UNSAFE MODE "TRY-PASS"
         if (!g_bIsSafe) {
-            __try {
-                return oProcessEvent(pObject, pFunction, pParams);
-            }
-            __except (1) {
-                return; // Swallow engine crash during exit
-            }
+            __try { return oProcessEvent(pObject, pFunction, pParams); }
+            __except (1) { return; }
         }
 
-        // 4. WHITELIST OPTIMIZATION
+        // 4. WHITELIST
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
         }
 
-        // 5. GET NAME & CHECK FOR EXIT
+        // 5. CHECK EXIT
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
         if (name[0] == '\0') {
@@ -299,11 +289,9 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
             __except (1) { return; }
         }
 
-        // 6. CHEAT LOGIC
+        // 6. LOGIC
         bool bBlock = false;
-        __try {
-            bBlock = ProcessEvent_Logic(pObject, pFunction, name);
-        }
+        __try { bBlock = ProcessEvent_Logic(pObject, pFunction, name); }
         __except (1) { bBlock = false; }
 
         if (bBlock) return;
@@ -311,7 +299,6 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Fallback: Drop the call if our logic crashed.
         return;
     }
 }
@@ -421,11 +408,10 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
-    // Reset caches if player changed (New World Load)
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] New Player Detected. Flushing Caches." << std::endl;
+        std::cout << "[System] New Player Detected." << std::endl;
+        // Caches already cleared by PerformWorldExit, but good redundancy
         Features::Reset();
-        Player::Reset();
         g_LastLocalPlayer = pLocal;
     }
 
@@ -446,6 +432,13 @@ void AttachPlayerHooks_Logic() {
 
 void Present_Logic() {
     ULONGLONG CurrentTime = GetTickCount64();
+
+    // [NEW] Cooldown Check
+    if (CurrentTime < g_ExitCooldown) {
+        g_bIsSafe = false;
+        return;
+    }
+
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
 
     if (!pLocal || !IsValidObject(pLocal)) {
@@ -458,6 +451,7 @@ void Present_Logic() {
         if (g_TimePlayerLost == 0) g_TimePlayerLost = CurrentTime;
 
         if ((CurrentTime - g_TimePlayerLost) > 1000) {
+            // Only trigger cleanup if we haven't already (check cooldown)
             if (g_LastLocalPlayer != nullptr) {
                 PerformWorldExit();
                 g_TimePlayerDetected = 0;
@@ -522,12 +516,10 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
-            static bool bHasAutoOpened = false;
-
             if (g_bIsSafe) {
-                if (!bHasAutoOpened) {
+                if (!g_bHasAutoOpened) {
                     g_ShowMenu = true;
-                    bHasAutoOpened = true;
+                    g_bHasAutoOpened = true;
                 }
 
                 if (g_ShowMenu) {
@@ -539,7 +531,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 }
             }
             else {
-                bHasAutoOpened = false;
+                // Ensure UI state matches Unsafe mode
                 ImGui::GetIO().MouseDrawCursor = false;
 
                 if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
