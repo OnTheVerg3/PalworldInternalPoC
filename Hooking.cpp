@@ -76,6 +76,8 @@ void InitModuleBounds() {
     }
 }
 
+// NOTE: IsValidObject moved to Hooking.h
+
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -217,8 +219,9 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
     // 1. ZOMBIE FILTER [TOP PRIORITY]
     // We check IsValidObject FIRST. This validates that the VTable is inside the Game Module.
-    // This catches 0xFF... (Sentinels), 0x3f... (Floats), and 0x4ab... (Heap Zombies).
+    // This catches 0xFF... (Sentinels), 0x3f... (Floats), and 0x3d... (Heap Zombies).
     // If an object fails this, it is dead. Drop it immediately.
+    // NOTE: This prevents the 0x3d... crash.
     if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
@@ -228,7 +231,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     GetNameSafe(pFunction, name, sizeof(name));
     if (name[0] == '\0') return;
 
-    // 3. DESTRUCTION PASS-THROUGH (Prevents Freeze)
+    // 3. DESTRUCTION PASS-THROUGH (Prevent Freeze)
     // If the object IS Valid, and the engine wants to destroy it, let it pass.
     bool bIsDestruction = RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay");
 
@@ -242,7 +245,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. UNSAFE MODE FILTER (Prevents Gameplay Crashes)
+    // 4. UNSAFE MODE FILTER (Prevent Random Gameplay Crashes)
     // If not destroying, and safe mode is off, drop it.
     if (!g_bIsSafe) return;
 
@@ -348,7 +351,6 @@ SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
         if (!IsValidObject(pPC)) return nullptr;
 
         SDK::APawn* pPawn = pPC->Pawn;
-        // Strict Check for Pawn
         if (!IsValidObject(pPawn)) return nullptr;
 
         char nameBuf[256];
