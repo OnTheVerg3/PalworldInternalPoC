@@ -12,67 +12,55 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex> 
-#include <psapi.h> 
+[cite_start]#include <psapi.h> // [cite: 4] Required for MODULEINFO
 
 #pragma comment(lib, "psapi.lib")
 
+// --- VMT HOOK INSTANCES ---
+VMTHook g_PawnHook;
+VMTHook g_ControllerHook;
+VMTHook g_ParamHook;
+
 // --- GLOBALS ---
-bool Hooking::bFoundValidTraffic = false;
-std::vector<void*> g_ActiveHooks;
-std::vector<void*> g_HookedObjects;
 std::mutex g_HookMutex;
 
 // --- FAST ACCESS CACHE ---
-extern SDK::APalPlayerCharacter* g_pLocal;
+SDK::APalPlayerCharacter* g_pLocal = nullptr;
 SDK::UObject* g_pController = nullptr;
 SDK::UObject* g_pParam = nullptr;
 
-// Time-Based Latches
+// Flags
+bool g_bIsSafe = false;
+bool g_ShowMenu = false;
+bool g_bHasAutoOpened = false;
+
+// Helpers
+void* g_LastLocalPlayer = nullptr;
 ULONGLONG g_TimePlayerDetected = 0;
-ULONGLONG g_TimePlayerLost = 0;
 ULONGLONG g_ExitCooldown = 0;
 
-std::atomic<bool> g_bIsSafe(false);
-
-// MODULE BOUNDS
-uintptr_t g_GameBase = 0;
-uintptr_t g_GameSize = 0;
-
-// LATCHES
-bool g_bPawnHooked = false;
-bool g_bControllerHooked = false;
-bool g_bParamHooked = false;
-
-// WATCHDOGS
-void* g_LastWorld = nullptr;
-void* g_LastLocalPlayer = nullptr;
-
-// DIRECTX
+// Rendering
 ID3D11Device* g_pd3dDevice = nullptr;
 ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 HWND g_window = nullptr;
-
-// UI STATE
-bool g_ShowMenu = false;
-bool g_bHasAutoOpened = false;
 
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 Present oPresent;
 WNDPROC oWndProc;
 
 typedef void(__thiscall* ProcessEvent_t)(SDK::UObject*, SDK::UFunction*, void*);
-ProcessEvent_t oProcessEvent = nullptr;
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-// --- MEMORY SAFETY HELPERS ---
+// --- BOUNDS & UTILS ---
+uintptr_t g_GameBase = 0;
+uintptr_t g_GameSize = 0;
 
 void InitModuleBounds() {
     if (g_GameBase != 0) return;
     HMODULE hMod = GetModuleHandle(NULL);
     if (!hMod) return;
-
     MODULEINFO mi;
     if (GetModuleInformation(GetCurrentProcess(), hMod, &mi, sizeof(mi))) {
         g_GameBase = (uintptr_t)mi.lpBaseOfDll;
@@ -80,92 +68,57 @@ void InitModuleBounds() {
     }
 }
 
-// NoInline to avoid C2712 (std::string destructor vs __try)
-__declspec(noinline) void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
-    std::string s = pObject->GetName();
-    if (s.length() < size) {
-        strcpy_s(outBuf, size, s.c_str());
-    }
-    else {
-        strncpy_s(outBuf, size, s.c_str(), size - 1);
-    }
-}
-
-void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
+// Helper to safely get names
+__declspec(noinline) void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     memset(outBuf, 0, size);
     if (!IsValidObject(pObject)) return;
     __try {
-        GetNameInternal(pObject, outBuf, size);
+        std::string s = pObject->GetName();
+        if (s.length() < size) strcpy_s(outBuf, size, s.c_str());
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        memset(outBuf, 0, size);
-    }
+    __except (1) { memset(outBuf, 0, size); }
 }
 
 bool RawStrContains(const char* haystack, const char* needle) {
     if (!haystack || !needle) return false;
-    size_t hLen = strlen(haystack);
-    size_t nLen = strlen(needle);
-    if (nLen > hLen) return false;
-
-    for (size_t i = 0; i <= hLen - nLen; ++i) {
-        bool match = true;
-        for (size_t j = 0; j < nLen; ++j) {
-            if (toupper(haystack[i + j]) != toupper(needle[j])) {
-                match = false;
-                break;
-            }
-        }
-        if (match) return true;
-    }
-    return false;
+    return strstr(haystack, needle) != nullptr;
 }
 
-bool IsValidSignature(uintptr_t addr) {
-    if (IsGarbagePtr((void*)addr)) return false;
-    __try {
-        unsigned char* b = (unsigned char*)addr;
-        if (b[0] == 0x40 && b[1] == 0x55 && b[2] == 0x56 && b[3] == 0x57) return true;
-        if (b[0] == 0x48 && b[1] == 0x89 && b[2] == 0x5C && b[3] == 0x24) return true;
-        if (b[0] == 0x4C && b[1] == 0x8B && b[2] == 0xDC) return true;
-    }
-    __except (1) { return false; }
-    return false;
-}
-
-// --- CLEANUP HELPER ---
-// NoInline + Manual Lock
+// --- CLEANUP (RESTORE ORIGINAL STATE) ---
+// [CRITICAL] This restores the Original VTables. 
+// The engine will now see the vanilla object and can destroy it safely.
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
 
+    g_HookMutex.lock();
+
+    // 1. Restore VTables (Unhook instantly)
+    // This solves the crash/freeze logic: We are no longer intercepting calls.
+    g_PawnHook.Restore();
+    g_ControllerHook.Restore();
+    g_ParamHook.Restore();
+
+    // 2. Clear Pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
-
-    g_HookMutex.lock();
-
-    g_ActiveHooks.clear();
-    g_HookedObjects.clear();
-    g_bPawnHooked = false;
-    g_bControllerHooked = false;
-    g_bParamHooked = false;
     g_LastLocalPlayer = nullptr;
 
-    Features::Reset();
-    Player::Reset();
-    Menu::Reset();
+    // 3. Reset Features
+    Features::Reset(); [cite_start]// [cite: 1]
+        Player::Reset(); [cite_start]// [cite: 2]
+        Menu::Reset();
 
     g_HookMutex.unlock();
 
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    // [FIX] Removed Async Detach. We now rely on Selective Filtering in the hook.
-    std::cout << "[Jarvis] World Exit Confirmed. Selective Filter Engaged." << std::endl;
+    std::cout << "[Jarvis] World Exit: Hooks Restored. Returning to vanilla state." << std::endl;
 }
 
-// --- AUTO-DETACH HELPER ---
+// --- DETACH CHECKER ---
 __declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
@@ -173,8 +126,8 @@ __declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const
         RawStrContains(name, "ClientTravel"))
     {
         if (pObject == g_pLocal || pObject == g_pController) {
-            std::cout << "[Jarvis] Exit Trigger: " << name << ". Engaging Selective Filter." << std::endl;
-            PerformWorldExit();
+            std::cout << "[Jarvis] Exit detected via: " << name << std::endl; [cite_start]// [cite: 1]
+                PerformWorldExit();
             return true;
         }
     }
@@ -191,204 +144,76 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         }
         return 0;
     }
-
     if (g_ShowMenu && g_bIsSafe) {
-        if (g_pd3dDevice) {
-            ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
-        }
-        switch (uMsg) {
-        case WM_MOUSEMOVE:
-        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
-        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
-        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
-        case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
-        case WM_MOUSEWHEEL:
-        case WM_KEYDOWN: case WM_KEYUP:
-        case WM_SYSKEYDOWN: case WM_SYSKEYUP:
-        case WM_CHAR:
-            return 1;
-        }
+        if (g_pd3dDevice) ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
+        return 1;
     }
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
-// --- LOGIC HELPER ---
+// --- CHEAT LOGIC ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
-    if (!Hooking::bFoundValidTraffic) {
-        if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
-            Hooking::bFoundValidTraffic = true;
-        }
-    }
-
     if (Features::bInfiniteDurability) {
         if (RawStrContains(name, "UpdateDurability") || RawStrContains(name, "Deterioration") || RawStrContains(name, "Broken")) return true;
     }
-
     if (Features::bInfiniteAmmo) {
         if (RawStrContains(name, "Consume") && RawStrContains(name, "Bullet")) return true;
         if (RawStrContains(name, "Decrease") && RawStrContains(name, "Bullet")) return true;
-        if (RawStrContains(name, "UseBullet")) return true;
-        if (RawStrContains(name, "RequestConsumeItem")) return true;
-        if (RawStrContains(name, "ConsumeItem")) return true;
     }
-
     if (Features::bInfiniteMagazine) {
         if (RawStrContains(name, "Reload")) return true;
     }
-
     return false;
-}
-
-// [HARDENED] Strict VTable Check
-__declspec(noinline) bool HasValidVTable(void* pObject) {
-    __try {
-        if (!pObject) return false;
-        void* vtable = *(void**)pObject;
-
-        if (IsGarbagePtr(vtable)) return false;
-        if ((uintptr_t)vtable < 0x10000000) return false;
-        if ((uintptr_t)vtable % 8 != 0) return false;
-
-        return true;
-    }
-    __except (1) { return false; }
 }
 
 // --- THE HOOK CALLBACK ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
-    if (g_GameBase == 0) InitModuleBounds();
+    // 1. Identify which Original Function to call
+    ProcessEvent_t oFunc = nullptr;
+    if (pObject == g_pLocal) oFunc = g_PawnHook.GetOriginal<ProcessEvent_t>(67);
+    else if (pObject == g_pController) oFunc = g_ControllerHook.GetOriginal<ProcessEvent_t>(67);
+    else if (pObject == g_pParam) oFunc = g_ParamHook.GetOriginal<ProcessEvent_t>(67);
+
+    // If we hooked an object but can't find original, CRITICAL FAILURE -> Return.
+    if (!oFunc) return;
 
     __try {
-        // 1. GARBAGE FILTER
-        if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
+        // 2. Validate
+        if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
 
-        // 2. VTABLE SANITY
-        if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
-            return; // Drop Zombie
-        }
-
-        // 3. GET NAME & CHECK FOR EXIT
+        // 3. Check for Exit
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
-
-        // [SAFETY] If name is missing, assume it's unsafe/garbage and drop it.
-        if (name[0] == '\0') return;
-
-        // If Exit Trigger detected, set Unsafe Mode and engage Filter
-        if (CheckAndPerformAutoDetach(pObject, name)) {
-            __try { return oProcessEvent(pObject, pFunction, pParams); }
-            __except (1) { return; }
-        }
-
-        // 4. UNSAFE MODE "SELECTIVE FILTER" [CRITICAL FIX]
-        // If we are shutting down (Unsafe Mode), we ONLY pass cleanup functions.
-        // We BLOCK all logic/update functions (Ticks, Anims) which cause the 0xFF crash.
-        if (!g_bIsSafe) {
-            if (RawStrContains(name, "ReceiveDestroyed") ||
-                RawStrContains(name, "ReceiveEndPlay") ||
-                RawStrContains(name, "Close") ||
-                RawStrContains(name, "Exit") ||
-                RawStrContains(name, "Shutdown") ||
-                RawStrContains(name, "Travel") ||
-                RawStrContains(name, "Unload"))
-            {
-                // Allow cleanup to proceed
-                __try { return oProcessEvent(pObject, pFunction, pParams); }
-                __except (1) { return; }
+        if (name[0] != '\0') {
+            if (CheckAndPerformAutoDetach(pObject, name)) {
+                // We just restored the VTable. 
+                // Calling oFunc is still safe because we have the pointer recorded.
+                return oFunc(pObject, pFunction, pParams);
             }
-            // BLOCK everything else (Update, Tick, ServerMove, etc.)
-            return;
-        }
 
-        // 5. WHITELIST OPTIMIZATION (Safe Mode)
-        // Only process our players when we are safely in-game.
-        if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
-            __try { return oProcessEvent(pObject, pFunction, pParams); }
-            __except (1) { return; }
-        }
-
-        // 6. CHEAT LOGIC
-        bool bBlock = false;
-        __try { bBlock = ProcessEvent_Logic(pObject, pFunction, name); }
-        __except (1) { bBlock = false; }
-
-        if (bBlock) return;
-
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return;
-    }
-}
-
-// --- HOOKING HELPERS ---
-bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
-    if (!IsValidObject(pObject)) return false;
-    void** vtable = *reinterpret_cast<void***>(pObject);
-    if (!IsValidObject((SDK::UObject*)vtable)) return false;
-    void* pTarget = vtable[index];
-    if (IsGarbagePtr(pTarget)) return false;
-
-    bool bAlreadyTracked = false;
-    {
-        std::lock_guard<std::mutex> lock(g_HookMutex);
-        for (void* ptr : g_ActiveHooks) {
-            if (ptr == pTarget) { bAlreadyTracked = true; break; }
-        }
-    }
-
-    if (!bAlreadyTracked) {
-        MH_STATUS status = MH_CreateHook(pTarget, &hkProcessEvent, (void**)&oProcessEvent);
-        if (status == MH_OK || status == MH_ERROR_ALREADY_CREATED) {
-            MH_EnableHook(pTarget);
-            {
-                std::lock_guard<std::mutex> lock(g_HookMutex);
-                g_ActiveHooks.push_back(pTarget);
+            // 4. Run Logic
+            if (g_bIsSafe) {
+                if (ProcessEvent_Logic(pObject, pFunction, name)) return; // Block
             }
-            std::cout << "[+] Hooked " << debugName << std::endl;
         }
-        else {
-            return false;
-        }
-    }
-    else {
-        MH_EnableHook(pTarget);
-    }
 
-    {
-        std::lock_guard<std::mutex> lock(g_HookMutex);
-        bool bFound = false;
-        for (void* ptr : g_HookedObjects) { if (ptr == pObject) { bFound = true; break; } }
-        if (!bFound) g_HookedObjects.push_back(pObject);
+        return oFunc(pObject, pFunction, pParams);
     }
-
-    return true;
+    __except (1) {
+        // If we crash inside our logic, fall back to original
+        return oFunc(pObject, pFunction, pParams);
+    }
 }
 
-bool ScanAndHook(SDK::UObject* pObject, int startIdx, int endIdx, const char* debugName) {
-    if (!IsValidObject(pObject)) return false;
-    void** vtable = *reinterpret_cast<void***>(pObject);
-
-    int foundIndex = -1;
-    for (int i = startIdx; i <= endIdx; i++) {
-        if (i < 10) continue;
-        if (IsValidSignature((uintptr_t)vtable[i])) { foundIndex = i; break; }
-    }
-    if (foundIndex != -1) { return HookIndex(pObject, foundIndex, debugName); }
-    return false;
-}
-
+// --- INITIALIZATION ---
 SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
     __try {
         if (!SDK::pGWorld || !*SDK::pGWorld) return nullptr;
-
         SDK::UWorld* pWorld = *SDK::pGWorld;
         if (!IsValidObject(pWorld)) return nullptr;
-        if (!IsValidObject(pWorld->PersistentLevel)) return nullptr;
 
         SDK::UGameInstance* pGI = pWorld->OwningGameInstance;
-        if (!IsValidObject(pGI)) return nullptr;
-        if (pGI->LocalPlayers.Num() <= 0) return nullptr;
+        if (!IsValidObject(pGI) || pGI->LocalPlayers.Num() <= 0) return nullptr;
 
         SDK::ULocalPlayer* pLocalPlayer = pGI->LocalPlayers[0];
         if (!IsValidObject(pLocalPlayer)) return nullptr;
@@ -399,100 +224,65 @@ SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
         SDK::APawn* pPawn = pPC->Pawn;
         if (!IsValidObject(pPawn)) return nullptr;
 
-        char nameBuf[256];
-        GetNameSafe(pPawn, nameBuf, sizeof(nameBuf));
-        if (!RawStrContains(nameBuf, "Player") && !RawStrContains(nameBuf, "Character")) return nullptr;
-
-        SDK::APalPlayerCharacter* pPalChar = static_cast<SDK::APalPlayerCharacter*>(pPawn);
-        if (!IsValidObject(pPalChar->CharacterParameterComponent)) return nullptr;
-        if (!IsValidObject(pPC->PlayerState)) return nullptr;
-
-        return pPalChar;
+        return static_cast<SDK::APalPlayerCharacter*>(pPawn);
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return nullptr;
-    }
-}
-
-SDK::APalPlayerCharacter* Hooking::GetLocalPlayerSafe() {
-    return Internal_GetLocalPlayer();
+    __except (1) { return nullptr; }
 }
 
 void AttachPlayerHooks_Logic() {
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) return;
 
-    g_pLocal = pLocal;
-    g_pController = pLocal->Controller;
-    g_pParam = pLocal->CharacterParameterComponent;
-
+    // Detect new player (Load)
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] New Player Detected. Flushing Caches." << std::endl;
+        std::cout << "[System] New Player Detected. Attaching VMT Hooks." << std::endl; [cite_start]// [cite: 1]
 
-        g_HookMutex.lock();
+            g_HookMutex.lock();
         Features::Reset();
         Player::Reset();
-        g_HookMutex.unlock();
+
+        g_pLocal = pLocal;
+        g_pController = pLocal->Controller;
+        g_pParam = pLocal->CharacterParameterComponent;
+
+        // --- APPLY VMT HOOKS ---
+        // 1. Pawn
+        if (g_PawnHook.Init(pLocal)) {
+            g_PawnHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
+            std::cout << "[+] Pawn Hooked (VMT)" << std::endl;
+        }
+
+        // 2. Controller
+        if (IsValidObject(g_pController) && g_ControllerHook.Init(g_pController)) {
+            g_ControllerHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
+            std::cout << "[+] Controller Hooked (VMT)" << std::endl;
+        }
+
+        // 3. Param
+        if (IsValidObject(g_pParam) && g_ParamHook.Init(g_pParam)) {
+            g_ParamHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
+            std::cout << "[+] Param Hooked (VMT)" << std::endl;
+        }
 
         g_LastLocalPlayer = pLocal;
-    }
-
-    if (g_bPawnHooked && g_bControllerHooked && g_bParamHooked) return;
-
-    if (!g_bPawnHooked) {
-        if (HookIndex(pLocal, 67, "Pawn")) g_bPawnHooked = true;
-    }
-
-    if (!g_bControllerHooked && pLocal->Controller && IsValidObject(pLocal->Controller)) {
-        if (ScanAndHook(pLocal->Controller, 10, 175, "Controller")) g_bControllerHooked = true;
-    }
-
-    if (!g_bParamHooked && pLocal->CharacterParameterComponent && IsValidObject(pLocal->CharacterParameterComponent)) {
-        if (HookIndex(pLocal->CharacterParameterComponent, 76, "ParamComp")) g_bParamHooked = true;
+        g_HookMutex.unlock();
     }
 }
 
 void Present_Logic() {
-    ULONGLONG CurrentTime = GetTickCount64();
-
-    if (CurrentTime < g_ExitCooldown) {
-        g_bIsSafe = false;
-        return;
-    }
+    if (GetTickCount64() < g_ExitCooldown) { g_bIsSafe = false; return; }
 
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
-
-    if (!pLocal || !IsValidObject(pLocal)) {
-        g_bIsSafe = false;
-
-        g_pLocal = nullptr;
-        g_pController = nullptr;
-        g_pParam = nullptr;
-
-        if (g_TimePlayerLost == 0) g_TimePlayerLost = CurrentTime;
-
-        if ((CurrentTime - g_TimePlayerLost) > 1000) {
-            if (g_LastLocalPlayer != nullptr) {
-                PerformWorldExit();
-                g_TimePlayerDetected = 0;
-            }
+    if (!IsValidObject(pLocal)) {
+        // If we lost the player, force exit state
+        if (g_LastLocalPlayer != nullptr) {
+            PerformWorldExit();
         }
         return;
     }
 
-    g_TimePlayerLost = 0;
-
-    if (g_TimePlayerDetected == 0) {
-        g_TimePlayerDetected = CurrentTime;
-        std::cout << "[System] Player detected. Stabilizing..." << std::endl;
-    }
-    if ((CurrentTime - g_TimePlayerDetected) < 3000) {
-        g_bIsSafe = false;
-        return;
-    }
-
     g_bIsSafe = true;
-    AttachPlayerHooks_Logic();
+    AttachPlayerHooks_Logic(); // Checks for new player and hooks if needed
 
     g_HookMutex.lock();
     __try { Features::RunLoop(); }
@@ -530,60 +320,40 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     }
 
     __try { Present_Logic(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { g_bIsSafe = false; }
+    __except (1) { g_bIsSafe = false; }
 
-    __try {
-        if (g_mainRenderTargetView) {
-            ImGui_ImplDX11_NewFrame();
-            ImGui_ImplWin32_NewFrame();
-            ImGui::NewFrame();
+    // UI Rendering
+    if (g_mainRenderTargetView) {
+        ImGui_ImplDX11_NewFrame();
+        ImGui_ImplWin32_NewFrame();
+        ImGui::NewFrame();
 
-            // Lock UI to prevent Race Condition
-            g_HookMutex.lock();
-
-            if (g_bIsSafe) {
-                if (!g_bHasAutoOpened) {
-                    g_ShowMenu = true;
-                    g_bHasAutoOpened = true;
-                }
-
-                if (g_ShowMenu) {
-                    ImGui::GetIO().MouseDrawCursor = true;
-                    Menu::Draw();
-                }
-                else {
-                    ImGui::GetIO().MouseDrawCursor = false;
-                }
+        g_HookMutex.lock();
+        if (g_bIsSafe) {
+            if (!g_bHasAutoOpened) { g_ShowMenu = true; g_bHasAutoOpened = true; }
+            if (g_ShowMenu) {
+                ImGui::GetIO().MouseDrawCursor = true;
+                Menu::Draw();
             }
             else {
                 ImGui::GetIO().MouseDrawCursor = false;
-
-                if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
-                    ImGui::SetNextWindowPos(ImVec2(10, 10));
-                    ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-                    ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
-                    ImGui::End();
-                }
             }
-
-            g_HookMutex.unlock();
-
-            ImGui::Render();
-            g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
-            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
         }
+        else {
+            ImGui::GetIO().MouseDrawCursor = false;
+        }
+        g_HookMutex.unlock();
+
+        ImGui::Render();
+        g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
 
     return oPresent(pSwapChain, SyncInterval, Flags);
 }
 
-void Hooking::AttachPlayerHooks() {
-    __try { AttachPlayerHooks_Logic(); }
-    __except (1) {}
-}
-
 void Hooking::Init() {
+    // [FIX] Restored DX11 Dummy Device code so presentAddr is defined
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, DefWindowProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, "DX11 Dummy", NULL };
     RegisterClassEx(&wc);
     HWND hWnd = CreateWindow("DX11 Dummy", NULL, WS_OVERLAPPEDWINDOW, 100, 100, 300, 300, NULL, NULL, wc.hInstance, NULL);
@@ -592,16 +362,34 @@ void Hooking::Init() {
     scd.BufferCount = 1; scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scd.OutputWindow = hWnd; scd.SampleDesc.Count = 1; scd.Windowed = true; scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     ID3D11Device* dev; ID3D11DeviceContext* ctx; IDXGISwapChain* swap;
+
     if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, levels, 1, D3D11_SDK_VERSION, &scd, &swap, &dev, NULL, &ctx))) {
-        DWORD_PTR* vtable = (DWORD_PTR*)swap; vtable = (DWORD_PTR*)vtable[0];
-        void* presentAddr = (void*)vtable[8];
-        swap->Release(); dev->Release(); ctx->Release(); DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
+        DWORD_PTR* vtable = (DWORD_PTR*)swap;
+        vtable = (DWORD_PTR*)vtable[0];
+        void* presentAddr = (void*)vtable[8]; [cite_start]// [cite: 4] Fixed undefined identifier
+
+            swap->Release(); dev->Release(); ctx->Release();
+        DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
+
         if (MH_Initialize() == MH_OK) {
             InitModuleBounds();
+            // Only MinHook 'Present'. ProcessEvent is handled via VMT.
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
             MH_EnableHook(MH_ALL_HOOKS);
         }
     }
 }
-void Hooking::Shutdown() { MH_DisableHook(MH_ALL_HOOKS); MH_Uninitialize(); }
-void Hooking::ProbeVTable(int index) {}
+
+void Hooking::Shutdown() {
+    // Restore VMTs first
+    g_PawnHook.Restore();
+    g_ControllerHook.Restore();
+    g_ParamHook.Restore();
+
+    MH_DisableHook(MH_ALL_HOOKS);
+    MH_Uninitialize();
+}
+
+void Hooking::AttachPlayerHooks() { AttachPlayerHooks_Logic(); }
+SDK::APalPlayerCharacter* Hooking::GetLocalPlayerSafe() { return Internal_GetLocalPlayer(); }
+// [FIX] Removed ProbeVTable to fix error E0135
