@@ -143,9 +143,8 @@ void PerformWorldExit() {
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
-        // [FIX] Do NOT call MH_DisableHook here.
-        // We just clear our internal tracking so we know to re-hook (re-enable) later.
-        // The hooks stay physically in memory but do nothing because g_bIsSafe is false.
+        // We do NOT disable hooks via MinHook to avoid deadlocks.
+        // We just clear our tracking so we know to re-hook later.
         g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
@@ -159,18 +158,15 @@ void PerformWorldExit() {
 }
 
 // --- AUTO-DETACH HELPER ---
+// Detects if the player is being destroyed and triggers Soft Detach
 bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
-    // Check for standard UE/Palworld exit triggers
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
         RawStrContains(name, "ClientReturnToMainMenu") ||
         RawStrContains(name, "ClientTravel"))
     {
         if (pObject == g_pLocal || pObject == g_pController) {
-            std::cout << "[Jarvis] World Exit Confirmed via: " << name << ". Soft Detaching..." << std::endl;
-
-            // [FIX] Removed MH_DisableHook loop to prevent deadlock.
-            // We proceed directly to logical cleanup.
+            std::cout << "[Jarvis] World Exit Confirmed via: " << name << ". Soft Detach Engaged." << std::endl;
             PerformWorldExit();
             return true;
         }
@@ -184,6 +180,7 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         g_ShowMenu = !g_ShowMenu;
 
         // Only capture mouse if In-Game. 
+        // In Main Menu, g_bIsSafe is false, so we never trap the cursor.
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
@@ -246,63 +243,73 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. GARBAGE FILTER [CRITICAL]
-    // Filter out 0xFF (Sentinel) and NULLs first.
-    // If we blindly pass these to the engine, it crashes (0xFF exception).
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
-        return;
-    }
-
-    // 2. UNSAFE MODE BYPASS (Ghost Mode)
-    // If exit was detected, we stop touching EVERYTHING immediately.
-    // We pass the call to the engine so it can destroy the valid object.
-    if (!g_bIsSafe) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 3. VTABLE SANITY CHECK
-    // Ensure the object has a valid VTable pointer.
-    // We use a light check here to avoid blocking valid DLL objects.
-    bool bVTableValid = false;
+    // WRAP EVERYTHING IN EXCEPTION HANDLER
     __try {
-        void* vtable = *(void**)pObject;
-        if (!IsGarbagePtr(vtable) && (uintptr_t)vtable > 0x10000) {
-            bVTableValid = true;
+        // 1. GARBAGE FILTER [ABSOLUTE PRIORITY]
+        // Checks pointer alignment and bounds. Does NOT dereference.
+        if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
+            return;
         }
-    }
-    __except (1) { bVTableValid = false; }
 
-    if (!bVTableValid) return; // Drop Bad Object
+        // 2. VTABLE SANITY CHECK [FIX FOR 0xFF CRASH]
+        // We MUST verify the VTable is valid BEFORE passing to oProcessEvent.
+        // Even in "Unsafe Mode", we cannot pass a Zombie (0xFF vtable) to the engine.
+        // If we dereference *pObject and get -1, we DROP it.
+        bool bVTableValid = false;
+        __try {
+            void* vtable = *(void**)pObject;
+            // Check if VTable pointer itself is garbage (0xFF, NULL, unaligned)
+            if (!IsGarbagePtr(vtable) && (uintptr_t)vtable > 0x10000) {
+                bVTableValid = true;
+            }
+        }
+        __except (1) { bVTableValid = false; }
 
-    // 4. WHITELIST OPTIMIZATION
-    // Only process our specific tracked objects.
-    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
+        if (!bVTableValid) return; // Drop Bad Object (Do NOT Pass)
+
+        // 3. UNSAFE MODE BYPASS [FIX FOR FREEZE]
+        // Now that we know the object is physically valid (has a VTable), 
+        // if we are in Shutdown/Unsafe Mode, we PASS it. 
+        // This allows valid objects to clean up (EndPlay), preventing the freeze.
+        if (!g_bIsSafe) {
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+
+        // 4. WHITELIST OPTIMIZATION
+        // Only process our specific tracked objects.
+        if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+
+        // 5. GET NAME & CHECK FOR EXIT
+        char name[256];
+        GetNameSafe(pFunction, name, sizeof(name));
+        if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
+
+        // If we detect destruction, we trigger Soft Detach immediately.
+        // This sets g_bIsSafe = false, enabling the pass-through for future calls.
+        if (CheckAndPerformAutoDetach(pObject, name)) {
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+
+        // 6. CHEAT LOGIC (Only runs if Safe)
+        bool bBlock = false;
+        __try {
+            bBlock = ProcessEvent_Logic(pObject, pFunction, name);
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            bBlock = false;
+        }
+
+        if (bBlock) return;
+
         return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 5. GET NAME & CHECK FOR EXIT
-    char name[256];
-    GetNameSafe(pFunction, name, sizeof(name));
-    if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
-
-    // If we detect destruction, we trigger Soft Detach immediately.
-    // This sets g_bIsSafe = false, enabling the pass-through for future calls.
-    if (CheckAndPerformAutoDetach(pObject, name)) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 6. CHEAT LOGIC (Only runs if Safe)
-    bool bBlock = false;
-    __try {
-        bBlock = ProcessEvent_Logic(pObject, pFunction, name);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        bBlock = false;
+        // [CRITICAL] If we crash anywhere above (e.g. reading a dying object's name),
+        // we DROP the call. Do NOT retry oProcessEvent, as that might be what caused the crash.
+        return;
     }
-
-    if (bBlock) return;
-
-    return oProcessEvent(pObject, pFunction, pParams);
 }
 
 // --- HOOKING HELPERS ---
@@ -323,7 +330,6 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
 
     if (!bAlreadyTracked) {
         MH_STATUS status = MH_CreateHook(pTarget, &hkProcessEvent, (void**)&oProcessEvent);
-        // If hook already exists (from previous session), we just enable it.
         if (status == MH_OK || status == MH_ERROR_ALREADY_CREATED) {
             MH_EnableHook(pTarget);
             {
