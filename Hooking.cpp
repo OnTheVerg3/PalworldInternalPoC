@@ -132,9 +132,13 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    // [FIX] No console logging to avoid deadlocks
-    // [FIX] No disabling hooks to avoid race conditions
+    // [FIX] No console logging to avoid IO deadlocks
+    // [FIX] No MinHook calls to avoid thread suspension deadlocks
 
+    // 1. Cut the line immediately
+    g_bIsSafe = false;
+
+    // 2. Clear pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
@@ -142,6 +146,7 @@ void PerformWorldExit() {
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
         g_HookedObjects.clear();
+        // Reset latches so we hook again in the next world
         g_bPawnHooked = false;
         g_bControllerHooked = false;
         g_bParamHooked = false;
@@ -189,12 +194,13 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     // [CRITICAL] DETECT SELF-DESTRUCTION
     if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
         if (pObject == g_pLocal) {
+            // Cut the line so future calls fail the White-List
             g_pLocal = nullptr;
             g_pController = nullptr;
             g_pParam = nullptr;
             g_bIsSafe = false;
         }
-        return false;
+        return false; // Proceed to Original Function (let it destroy)
     }
 
     if (!Hooking::bFoundValidTraffic) {
@@ -228,49 +234,39 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 
 // --- THE HOOK CALLBACK ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
-    if (g_GameBase == 0) InitModuleBounds();
-
     // 1. UNSAFE MODE (Transition / Menu) [PRIORITY 1]
-    // If we are in transition (g_bIsSafe == false), we MUST Pass-Through everything.
-    // The engine may send Sentinels (0xFF...) or Zombies during cleanup.
-    // We wrap this in a __try block to prevent the cheat from crashing the game if the engine faults.
-
-    bool bWorldValid = false;
-    __try {
-        // Safe check for UWorld pointer
-        if (SDK::pGWorld && *SDK::pGWorld) bWorldValid = true;
-    }
-    __except (1) { bWorldValid = false; }
-
-    if (!g_bIsSafe || !bWorldValid) {
-        __try {
-            if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams);
-        }
-        __except (1) {}
-        return;
+    // If g_bIsSafe is false (Shutdown), we pass everything to the engine IMMEDIATELY.
+    // We do NOT check pointers. The engine handles its own sentinels (-1).
+    // We do NOT use __try (Deadlock risk).
+    if (!g_bIsSafe) {
+        return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 2. STRICT VALIDATION [PRIORITY 2]
-    // If we are in-game, we Drop garbage.
+    // 2. WORLD VALIDITY
+    // Cheap check. If world is null, we are unsafe.
+    if (!SDK::pGWorld || !*SDK::pGWorld) {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
+    // 3. STRICT VALIDATION [PRIORITY 2]
+    // Now we are in "Safe Mode". Pointers must be valid and readable.
+    // If bad, we DROP them.
     if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
-    // 3. WHITE-LIST FILTER
+    // 4. WHITE-LIST FILTER
+    // Only process our cached objects.
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
-        __try { if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams); }
-        __except (1) {}
-        return;
+        return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. SAFE MODE (Gameplay)
+    // 5. SAFE MODE LOGIC
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
 
     if (name[0] == '\0') {
-        __try { if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams); }
-        __except (1) {}
-        return;
+        return oProcessEvent(pObject, pFunction, pParams);
     }
 
     bool bBlock = false;
@@ -283,17 +279,14 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
     if (bBlock) return;
 
-    __try {
-        if (oProcessEvent) oProcessEvent(pObject, pFunction, pParams);
-    }
-    __except (1) {}
+    return oProcessEvent(pObject, pFunction, pParams);
 }
 
 // --- HOOKING HELPERS ---
 bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
     if (!IsValidObject(pObject)) return false;
     void** vtable = *reinterpret_cast<void***>(pObject);
-    if (!IsValidObject((SDK::UObject*)vtable)) return false; // Basic pointer check
+    if (!IsValidObject((SDK::UObject*)vtable)) return false;
     void* pTarget = vtable[index];
     if (IsGarbagePtr(pTarget)) return false;
 
@@ -343,7 +336,6 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
 bool ScanAndHook(SDK::UObject* pObject, int startIdx, int endIdx, const char* debugName) {
     if (!IsValidObject(pObject)) return false;
     void** vtable = *reinterpret_cast<void***>(pObject);
-    // Bounds check vtable implicitly done by IsValidObject(pObject)
 
     int foundIndex = -1;
     for (int i = startIdx; i <= endIdx; i++) {
