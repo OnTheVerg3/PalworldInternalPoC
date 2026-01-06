@@ -28,34 +28,38 @@ namespace Features {
     SDK::APalWeaponBase* g_LastWeapon = nullptr;
     WeaponBackup g_OriginalStats;
 
-    // [NEW] RESET FUNCTION
+    // [FIX] Global Cache for Functions (cleared on World Exit)
+    std::unordered_map<std::string, SDK::UFunction*> g_FuncCache;
+
     void Reset() {
         g_LastWeapon = nullptr;
         g_OriginalStats.bSaved = false;
-        std::cout << "[Features] State reset." << std::endl;
+
+        // [CRITICAL FIX] Clear cached UFunctions on level transition
+        // Prevents using dead pointers in the next world (which causes 2nd entry crash)
+        g_FuncCache.clear();
+
+        std::cout << "[Features] State and Cache reset." << std::endl;
     }
 
     SDK::UFunction* GetCachedFunc(const char* name) {
-        static std::unordered_map<std::string, SDK::UFunction*> cache;
-
         // Return cached if exists
-        if (cache.find(name) != cache.end()) {
-            return cache[name];
+        auto it = g_FuncCache.find(name);
+        if (it != g_FuncCache.end()) {
+            return it->second;
         }
 
-        // [CRITICAL FIX] Verify GObjects before scanning
-        // Prevents 0x8 crash during world exit
+        // [SAFETY] Verify GObjects before scanning
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
             return nullptr;
         }
 
         SDK::UFunction* fn = SDK::UObject::FindObject<SDK::UFunction>(name);
-        if (fn) cache[name] = fn;
+        if (fn) g_FuncCache[name] = fn;
         return fn;
     }
 
     void RunLoop_Logic() {
-        // [SAFETY] Double check globals
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
         SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();

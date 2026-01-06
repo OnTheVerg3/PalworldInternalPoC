@@ -3,13 +3,12 @@
 #include "SDKGlobal.h"
 #include "imgui.h"
 #include "imgui_style.h"
-#include "Hooking.h" // [FIX] Required for IsGarbagePtr/IsValidObject
+#include "Hooking.h" // Required for IsGarbagePtr/IsValidObject
 #include <iostream>
 #include <string>
 #include <algorithm>
 #include <vector>
 
-// Access globals from Hooking.cpp if needed
 extern std::vector<uintptr_t> g_PatternMatches;
 extern int g_CurrentMatchIndex;
 
@@ -20,23 +19,20 @@ SDK::FString StdToFString(const std::string& str) {
 }
 
 SDK::UObject* FindRealInventoryData() {
-    // [CRITICAL FIX] Verify GObjects validity
     if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return nullptr;
 
-    static SDK::UClass* TargetClass = SDK::UObject::FindObject<SDK::UClass>("Class Pal.PalPlayerInventoryData");
+    // [FIX] Removed static to ensure freshness on re-entry
+    SDK::UClass* TargetClass = SDK::UObject::FindObject<SDK::UClass>("Class Pal.PalPlayerInventoryData");
     if (!TargetClass) TargetClass = SDK::UObject::FindObject<SDK::UClass>("PalPlayerInventoryData");
     if (!TargetClass) return nullptr;
 
-    // Quick heuristic scan to find a valid inventory
     for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
         SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
-        if (!IsValidObject(Obj)) continue; // [FIX] Use strict validation
+        if (!IsValidObject(Obj)) continue;
 
         if (Obj->IsA(TargetClass)) {
             std::string name = Obj->GetName();
             if (name.find("Default__") != std::string::npos) continue;
-
-            // Return the first valid non-default inventory found
             return Obj;
         }
     }
@@ -45,18 +41,14 @@ SDK::UObject* FindRealInventoryData() {
 
 // --- SPAWN METHODS ---
 
-// [Fix] Signature now accepts const char* string, not FName
 void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) {
     if (!pInventory) { std::cout << "[-] Method 1: Inventory null." << std::endl; return; }
-
-    // [FIX] Safety Check
     if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
-    static auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
+    // [FIX] Removed static
+    auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fn) {
         struct { SDK::FName ID; int32_t Num; bool bLog; float Dur; } params;
-
-        // Convert string to FName internally
         params.ID = SDK::UKismetStringLibrary::GetDefaultObj()->Conv_StringToName(StdToFString(ItemID));
         params.Num = Count;
         params.bLog = true;
@@ -67,27 +59,22 @@ void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) 
     }
 }
 
-// [Fix] Signature now accepts const char* string, not FName
 void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory, const char* ItemID, int32_t Count) {
     if (!pInventory || !pController) return;
     if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
-    // 1. Add Locally
-    static auto fnAdd = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
+    // [FIX] Removed statics
+    auto fnAdd = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fnAdd) {
         struct { SDK::FName ID; int32_t Num; bool bLog; float Dur; } params;
-
-        // Convert string to FName internally
         params.ID = SDK::UKismetStringLibrary::GetDefaultObj()->Conv_StringToName(StdToFString(ItemID));
         params.Num = Count;
         params.bLog = true;
         params.Dur = 0.0f;
-
         pInventory->ProcessEvent(fnAdd, &params);
     }
 
-    // 2. Force Sync
-    static auto fnDirty = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.RequestForceMarkAllDirty_ToServer");
+    auto fnDirty = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.RequestForceMarkAllDirty_ToServer");
     if (fnDirty) {
         struct { bool bUnused; } params = { true };
         pInventory->ProcessEvent(fnDirty, &params);
@@ -103,24 +90,20 @@ static char manualIdBuffer[64] = "PalSphere";
 static int itemQty = 1;
 
 void ItemSpawner::DrawTab() {
-    // 1. SEARCH BAR
     ImGui::SetNextItemWidth(-1);
     ImGui::InputTextWithHint("##Search", "Search all items...", searchBuffer, sizeof(searchBuffer));
     bool isSearching = (strlen(searchBuffer) > 0);
 
     ImGui::Spacing();
 
-    // 2. SPLIT VIEW
     if (isSearching) {
         ImGui::BeginChild("SearchResults", ImVec2(0, -60), true);
         std::string filter = searchBuffer;
-        // Simple case-insensitive search could be implemented here
         for (const auto& cat : Database::Categories) {
             for (const auto& item : cat.Items) {
                 std::string itemName = item.Name;
                 if (itemName.length() == 0) continue;
 
-                // Check substring
                 auto it = std::search(
                     itemName.begin(), itemName.end(),
                     filter.begin(), filter.end(),
@@ -137,11 +120,9 @@ void ItemSpawner::DrawTab() {
         ImGui::EndChild();
     }
     else {
-        // --- Standard View ---
         ImGui::Columns(2, "SpawnerColumns", true);
         ImGui::SetColumnWidth(0, 160.0f);
 
-        // LEFT PANE: Categories
         ImGui::BeginChild("Categories", ImVec2(0, -60));
         for (int i = 0; i < Database::Categories.size(); i++) {
             bool isSelected = (selectedCategoryIdx == i);
@@ -154,7 +135,6 @@ void ItemSpawner::DrawTab() {
 
         ImGui::NextColumn();
 
-        // RIGHT PANE: Items
         ImGui::BeginChild("Items", ImVec2(0, -60));
         if (selectedCategoryIdx >= 0 && selectedCategoryIdx < Database::Categories.size()) {
             const auto& items = Database::Categories[selectedCategoryIdx].Items;
@@ -170,7 +150,6 @@ void ItemSpawner::DrawTab() {
         ImGui::Columns(1);
     }
 
-    // 3. CONTROLS
     ImGui::Separator();
 
     ImGui::PushItemWidth(120);
@@ -186,7 +165,6 @@ void ItemSpawner::DrawTab() {
 
     ImGui::SameLine();
 
-    // Spawn Buttons - Now using valid function calls
     if (CustomButton("SPAWN", ImVec2(100, 30), false)) {
         Spawn_Method1(FindRealInventoryData(), manualIdBuffer, itemQty);
     }

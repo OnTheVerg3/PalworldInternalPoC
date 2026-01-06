@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstring> 
 #include <algorithm>
+#include <unordered_map>
 
 namespace Player
 {
@@ -19,10 +20,12 @@ namespace Player
     bool bCollectRelics = false;
 
     // --- STATE MANAGEMENT ---
-    // [FIX] These are defined exactly ONCE here.
     std::vector<SDK::APalLevelObjectObtainable*> g_RelicCache;
     ULONGLONG g_LastCollectTime = 0;
     const ULONGLONG COLLECTION_INTERVAL_MS = 250;
+
+    // [FIX] Global Cache for UFunctions
+    std::unordered_map<std::string, SDK::UFunction*> g_PlayerFuncCache;
 
     // --- INTERNAL HELPERS ---
 
@@ -35,14 +38,30 @@ namespace Player
 
     void CallFn(SDK::UObject* obj, const char* fnName, void* params = nullptr) {
         if (!IsValidObject(obj)) return;
-        static auto fn = SDK::UObject::FindObject<SDK::UFunction>(fnName);
+
+        // [CRITICAL FIX] Use map cache instead of static local
+        // Static local would only initialize ONCE for the first fnName called, breaking all others.
+
+        SDK::UFunction* fn = nullptr;
+        auto it = g_PlayerFuncCache.find(fnName);
+        if (it != g_PlayerFuncCache.end()) {
+            fn = it->second;
+        }
+        else {
+            fn = SDK::UObject::FindObject<SDK::UFunction>(fnName);
+            if (fn) g_PlayerFuncCache[fnName] = fn;
+        }
+
         if (fn) obj->ProcessEvent(fn, params);
     }
 
     // --- RESET FUNCTION ---
-    // Called by Hooking.cpp when world transition detects !pLocal
     void Reset() {
         g_RelicCache.clear();
+
+        // [CRITICAL FIX] Clear UFunction cache on world exit
+        g_PlayerFuncCache.clear();
+
         bCollectRelics = false;
         std::cout << "[Player] Cache cleared and features reset." << std::endl;
     }
@@ -66,22 +85,18 @@ namespace Player
             TeleportRelicsToPlayer(pLocal);
         }
         else {
-            // Clear cache if user manually toggles off
             if (!g_RelicCache.empty()) g_RelicCache.clear();
         }
     }
 
     void ProcessAttributes(SDK::APalPlayerCharacter* pLocal)
     {
-        // --- ATTACK ---
         if (bAttackMultiplier) {
             if (IsValidObject(pLocal->CharacterParameterComponent)) {
-                // Legacy logic: Base is approx 50
                 pLocal->CharacterParameterComponent->AttackUp = (int32_t)(50 * fAttackModifier);
             }
         }
 
-        // --- WEIGHT ---
         if (bWeightAdjuster) {
             SDK::APlayerController* PC = static_cast<SDK::APlayerController*>(pLocal->Controller);
             if (IsValidObject(PC) && IsValidObject(PC->PlayerState)) {
@@ -91,7 +106,6 @@ namespace Player
                     auto inv = pState->InventoryData;
                     inv->MaxInventoryWeight = fWeightModifier;
 
-                    // Force Replication & Sync
                     CallFn(inv, "Function Pal.PalPlayerInventoryData.OnRep_maxInventoryWeight");
                     CallFn(inv, "Function Pal.PalPlayerInventoryData.OnRep_BuffMaxWeight");
                     CallFn(inv, "Function Pal.PalPlayerInventoryData.OnRep_BuffCurrentWeight");
@@ -115,7 +129,6 @@ namespace Player
 
                 char nameBuf[256];
                 GetNameSafe(Obj, nameBuf, sizeof(nameBuf));
-                // PalGameSetting singleton
                 if (strstr(nameBuf, "PalGameSetting") && !strstr(nameBuf, "Default__")) {
                     SDK::UPalGameSetting* pSettings = static_cast<SDK::UPalGameSetting*>(Obj);
                     pSettings->worldmapUIMaskClearSize = 20000.0f;
@@ -168,7 +181,6 @@ namespace Player
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
         if (!IsValidObject(PalPC) || !IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
-        // 1. POPULATE CACHE (One-Pass)
         if (g_RelicCache.empty()) {
             std::cout << "[Jarvis] Single-Pass Scan initiated..." << std::endl;
             __try {
@@ -179,7 +191,6 @@ namespace Player
 
                         if (IsClass(Obj, "PalLevelObjectRelic") || IsClass(Obj, "BP_LevelObject_Relic_C")) {
                             SDK::APalLevelObjectObtainable* Relic = static_cast<SDK::APalLevelObjectObtainable*>(Obj);
-                            // Only add valid, unpicked relics
                             if (!Relic->bPickedInClient) {
                                 g_RelicCache.push_back(Relic);
                             }
@@ -195,7 +206,6 @@ namespace Player
 
             std::cout << "[Jarvis] Scan Complete. Found: " << g_RelicCache.size() << std::endl;
 
-            // If nothing found, stop immediately.
             if (g_RelicCache.empty()) {
                 std::cout << "[Jarvis] No relics found. Disabling." << std::endl;
                 bCollectRelics = false;
@@ -203,29 +213,26 @@ namespace Player
             }
         }
 
-        // 2. PROCESS QUEUE
         auto it = g_RelicCache.begin();
         while (it != g_RelicCache.end()) {
             SDK::APalLevelObjectObtainable* Relic = *it;
 
             if (!IsValidObject(Relic) || Relic->bPickedInClient) {
-                it = g_RelicCache.erase(it); // Remove dead/collected
+                it = g_RelicCache.erase(it);
                 continue;
             }
 
-            // Valid Relic Found - Collect it
             if (IsValidObject(pLocal->InteractComponent)) {
                 pLocal->InteractComponent->SetEnableInteract(true, false);
                 PalPC->Transmitter->Player->RequestObtainLevelObject_ToServer(Relic);
                 std::cout << "[Jarvis] Collecting Relic (" << g_RelicCache.size() - 1 << " remaining)" << std::endl;
             }
 
-            it = g_RelicCache.erase(it); // Remove from queue
+            it = g_RelicCache.erase(it);
             g_LastCollectTime = CurrentTime;
-            break; // Wait for next tick
+            break;
         }
 
-        // 3. AUTO-SHUTDOWN
         if (g_RelicCache.empty()) {
             std::cout << "[Jarvis] Job complete. Disabling vacuum." << std::endl;
             bCollectRelics = false;

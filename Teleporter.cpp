@@ -10,7 +10,11 @@ namespace Teleporter
     // --- INTERNAL HELPERS ---
     void CallFn(SDK::UObject* obj, const char* fnName, void* params = nullptr) {
         if (!IsValidObject(obj)) return;
-        static auto fn = SDK::UObject::FindObject<SDK::UFunction>(fnName);
+
+        // [FIX] Removed 'static' to find function dynamically every time.
+        // This is safe for UI actions and prevents stale pointers.
+        auto fn = SDK::UObject::FindObject<SDK::UFunction>(fnName);
+
         if (fn) obj->ProcessEvent(fn, params);
     }
 
@@ -33,12 +37,10 @@ namespace Teleporter
         auto* NetworkPlayer = PalPC->Transmitter->Player;
 
         // 2. Prepare Data
-        // Offset Z to prevent falling through floor
         SDK::FVector SafeLoc = { Location.X, Location.Y, Location.Z + 100.0f };
-        SDK::FQuat Rotation = { 0, 0, 0, 1 }; // Identity Quaternion
+        SDK::FQuat Rotation = { 0, 0, 0, 1 };
 
         // 3. Send "Register Respawn Point" Packet
-        // Function Signature: void RegisterRespawnPoint_ToServer(FGuid PlayerUId, FVector Location, FQuat Rotation);
         struct {
             SDK::FGuid PlayerUId;
             SDK::FVector Location;
@@ -52,7 +54,6 @@ namespace Teleporter
         CallFn(NetworkPlayer, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
 
         // 4. Send "Teleport To Safe Point" Packet
-        // This triggers the server to move us to the point we just registered
         CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
 
         std::cout << "[Jarvis] Teleport sequence executed." << std::endl;
@@ -80,16 +81,13 @@ namespace Teleporter
 
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal)
     {
-        // Placeholder: Needs logic to iterate Base Camps or Pal Workers
-        // For now, we can just log or implement if you have the BaseCamp SDK structs.
         std::cout << "[Jarvis] Home teleport logic pending SDK integration." << std::endl;
     }
 
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex)
     {
-        // Example Boss Coordinates (You can expand this list)
         static const struct { const char* Name; SDK::FVector Loc; } Bosses[] = {
-            { "Zoe & Grizzbolt", { 1234.0f, 5678.0f, 0.0f } }, // Replace with real coords
+            { "Zoe & Grizzbolt", { 1234.0f, 5678.0f, 0.0f } },
             { "Lily & Lyleen",   { 0.0f, 0.0f, 0.0f } }
         };
 
