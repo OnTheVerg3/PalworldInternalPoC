@@ -76,6 +76,8 @@ void InitModuleBounds() {
     }
 }
 
+// NOTE: IsValidObject and IsGarbagePtr are in Hooking.h (inline)
+
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -130,8 +132,10 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
+    // 1. Cut the line immediately
     g_bIsSafe = false;
 
+    // 2. Clear pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
@@ -145,6 +149,7 @@ void PerformWorldExit() {
         g_LastLocalPlayer = nullptr;
     }
 
+    // 3. Reset Feature Caches
     Features::Reset();
     Player::Reset();
 }
@@ -182,6 +187,8 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
 // --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
+    // Note: We handle Destruction events in the main hook now for safety.
+
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
             Hooking::bFoundValidTraffic = true;
@@ -215,29 +222,47 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
+    // [STEP 1] POINTER SANITY (Fast)
+    // If the pointer itself is -1 or null, return immediately.
     if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
+    // [STEP 2] OBJECT VALIDITY (Strict)
+    // We verify the VTable is valid and inside the game module.
+    // If this fails, the object is a ZOMBIE. We MUST DROP IT.
+    // Passing a Zombie to oProcessEvent (even for destruction) causes the 0xFF crash.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return;
+    }
+
+    // [STEP 3] UNSAFE MODE PASS-THROUGH (Prevent Freeze)
+    // If the object passed Step 2, it is VALID.
+    // If we are shutting down (!g_bIsSafe), we let the engine process it.
+    // This allows the engine to call EndPlay/Destroy on valid objects without freezing.
+    if (!g_bIsSafe) {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
+    // [STEP 4] SAFE MODE CHECKS
+    // Game is running. Apply Whitelist.
+    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
+    // [STEP 5] CHEAT LOGIC
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
-    if (name[0] == '\0') return;
+    if (name[0] == '\0') {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
 
-    bool bIsDestruction = RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay");
-
-    if (bIsDestruction) {
+    // Detect Self-Destruction in Safe Mode to trigger Exit Logic
+    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
         if (pObject == g_pLocal) {
             g_pLocal = nullptr;
             g_pController = nullptr;
             g_pParam = nullptr;
-            g_bIsSafe = false;
+            g_bIsSafe = false; // Trigger Unsafe Mode for subsequent calls
         }
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    if (!g_bIsSafe) return;
-
-    if (!IsValidObject(pObject)) return;
-
-    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
@@ -366,12 +391,10 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
-    // [CRITICAL FIX] CHECK FOR PLAYER INSTANCE SWAP
-    // If the player pointer changed since last frame, it means we loaded a new world.
-    // We MUST force a reset of the Feature caches to remove stale UFunctions.
+    // [CRITICAL] RESET CACHES ON PLAYER CHANGE
+    // If we loaded a new world (pointer changed), wipe old function pointers.
     if (pLocal != g_LastLocalPlayer) {
         if (g_LastLocalPlayer != nullptr) {
-            std::cout << "[System] World Transition Detected (Player Ptr Change). Flushing Caches." << std::endl;
             Features::Reset();
             Player::Reset();
         }
@@ -478,7 +501,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                     Menu::Draw();
                 }
                 else {
-                    // Safe Overlay
+                    // Safe Overlay - Only draw if GObjects is vaguely valid
                     if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
                         ImGui::SetNextWindowPos(ImVec2(10, 10));
                         ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
