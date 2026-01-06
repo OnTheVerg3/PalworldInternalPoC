@@ -147,7 +147,7 @@ void PerformWorldExit() {
         g_bPawnHooked = false;
         g_bControllerHooked = false;
         g_bParamHooked = false;
-        g_LastLocalPlayer = nullptr; // Reset tracking so we know we exited
+        g_LastLocalPlayer = nullptr;
     }
 
     Features::Reset();
@@ -201,7 +201,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
-// --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
@@ -210,11 +209,7 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     }
 
     if (Features::bInfiniteDurability) {
-        if (RawStrContains(name, "UpdateDurability") ||
-            RawStrContains(name, "Deterioration") ||
-            RawStrContains(name, "Broken")) {
-            return true;
-        }
+        if (RawStrContains(name, "UpdateDurability") || RawStrContains(name, "Deterioration") || RawStrContains(name, "Broken")) return true;
     }
 
     if (Features::bInfiniteAmmo) {
@@ -232,41 +227,72 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     return false;
 }
 
+// Helper: Lightweight VTable Check (Fixes 0xFF crash without freezing on DLLs)
+bool HasValidVTable(void* pObject) {
+    __try {
+        if (!pObject) return false;
+        void* vtable = *(void**)pObject;
+
+        // Garbage Filter: Check alignment, range, and sentinel values
+        if (IsGarbagePtr(vtable)) return false;
+
+        // Low-Address Filter: Catches floats/ints treated as pointers (common in zombies)
+        if ((uintptr_t)vtable < 0x10000) return false;
+
+        return true;
+    }
+    __except (1) { return false; }
+}
+
 // --- THE HOOK CALLBACK ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
     __try {
-        // 1. GARBAGE FILTER
+        // 1. GARBAGE FILTER (Pointer Itself)
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
-            return;
+            return; // Drop bad pointers
         }
 
-        // 2. UNSAFE MODE "TRY-PASS"
+        // 2. VTABLE SANITY (The "Zombie" Filter)
+        // [CRITICAL] This must happen BEFORE any pass-through.
+        // Even in Unsafe Mode, we cannot pass objects with invalid VTables.
+        // This stops the 0xFFFFFFFFFFFFFFFF crash.
+        if (!HasValidVTable(pObject)) {
+            return; // Drop Zombie Objects
+        }
+
+        // 3. UNSAFE MODE "TRY-PASS" (Soft Detach)
+        // If exiting, we pass everything VALID to the engine.
+        // We wrap it in a try-catch so if the engine *does* crash, we catch it.
         if (!g_bIsSafe) {
             __try {
                 return oProcessEvent(pObject, pFunction, pParams);
             }
             __except (1) {
-                // If it crashes here, the object was dead. We just drop it.
-                return;
+                return; // Swallow engine crash during exit
             }
         }
 
-        // 3. WHITELIST OPTIMIZATION
+        // 4. WHITELIST OPTIMIZATION
+        // Only process our specific tracked objects.
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
-            return oProcessEvent(pObject, pFunction, pParams);
-        }
-
-        // 4. VTABLE SANITY
-        if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-            return;
+            // Pass safe non-player objects to engine
+            __try { return oProcessEvent(pObject, pFunction, pParams); }
+            __except (1) { return; }
         }
 
         // 5. GET NAME & CHECK FOR EXIT
         char name[256];
+        GetNameSafe(pObject, name, sizeof(name)); // Use pObject? GetNameSafe takes UObject*.
+        // Wait, GetNameSafe takes pObject inside. But we usually check pFunction name.
+        // Let's get FUNCTION name for triggers.
         GetNameSafe(pFunction, name, sizeof(name));
-        if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
+
+        if (name[0] == '\0') {
+            __try { return oProcessEvent(pObject, pFunction, pParams); }
+            __except (1) { return; }
+        }
 
         if (CheckAndPerformAutoDetach(pObject, name)) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
@@ -285,9 +311,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        // [CRITICAL FIX]
-        // If our logic crashed, it means the object is dangerous. 
-        // DO NOT pass it to the engine. DROP IT.
+        // Fallback: Drop the call if our logic crashed.
         return;
     }
 }
@@ -397,9 +421,7 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
-    // [FIX] FORCE RESET ON PLAYER CHANGE
-    // Even if g_LastLocalPlayer was nullptr (from exit), we MUST reset Features cache.
-    // This fixes the crash on 2nd world join caused by stale pointers.
+    // Reset caches if player changed (New World Load)
     if (pLocal != g_LastLocalPlayer) {
         std::cout << "[System] New Player Detected. Flushing Caches." << std::endl;
         Features::Reset();
