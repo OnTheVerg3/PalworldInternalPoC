@@ -142,8 +142,6 @@ void PerformWorldExit() {
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
-        // We do NOT disable hooks here. We just stop logic.
-        // Hooks remain active but in "Pass-Through" mode.
         g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
@@ -154,6 +152,28 @@ void PerformWorldExit() {
 
     Features::Reset();
     Player::Reset();
+}
+
+// --- AUTO-DETACH HELPER ---
+// Detects Player destruction and unhooks safely
+bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
+    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
+        if (pObject == g_pLocal) {
+            std::cout << "[Jarvis] World Exit Detected. Detaching Hooks..." << std::endl;
+
+            // Disable hooks safely using RAII lock
+            {
+                std::lock_guard<std::mutex> lock(g_HookMutex);
+                for (void* pHook : g_ActiveHooks) {
+                    MH_DisableHook(pHook);
+                }
+            }
+
+            PerformWorldExit();
+            return true;
+        }
+    }
+    return false;
 }
 
 // --- INPUT HANDLER ---
@@ -222,41 +242,39 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. ABSOLUTE PASS-THROUGH (Unsafe Mode)
-    // If we are not safe (Shutdown/Loading), we do NOTHING.
-    // We pass the call to the engine blindly. This prevents race conditions.
+    // 1. ABSOLUTE UNSAFE BYPASS [CRITICAL FIX]
+    // If not safe, pass execution IMMEDIATELY. Do not check pointers. Do not collect $200.
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 2. VALIDATION (Safe Mode)
-    // We are in-game. Now we must validate pointers before reading.
-    // If a pointer is garbage (but we are in-game), we just pass it.
-    // We do NOT crash, we just don't touch it.
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction) || !IsValidObject(pObject) || !IsValidObject(pFunction)) {
+    // 2. GARBAGE POINTER CHECK
+    // If the pointer address itself is junk (0xFF or NULL), we MUST drop it.
+    // Passing this to oProcessEvent (even blindly) will crash the engine.
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
+        return;
+    }
+
+    // 3. WHITELIST OPTIMIZATION (Prevent 0xFF Reads)
+    // If the object is NOT one of our tracked objects, we pass it immediately.
+    // We do NOT call IsValidObject or GetNameSafe on random objects.
+    // This protects us from reading memory of random dying actors.
+    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 3. GET NAME
+    // 4. STRICT VALIDATION (Only for tracked objects)
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return;
+    }
+
+    // 5. GET NAME & CHECK EXIT
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
-    if (name[0] == '\0') {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
+    if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
 
-    // 4. EXIT DETECTION
-    // If we see the local player being destroyed, we engage the Kill Switch.
-    // Future calls will hit Step 1 and pass through instantly.
-    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
-        if (pObject == g_pLocal) {
-            std::cout << "[Jarvis] Player Destruction Detected. Disengaging Logic." << std::endl;
-            PerformWorldExit(); // Sets g_bIsSafe = false
-            return oProcessEvent(pObject, pFunction, pParams);
-        }
-    }
-
-    // 5. WHITELIST
-    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
+    // If this returns true, it means we detected exit, disabled hooks, and are now unsafe.
+    if (CheckAndPerformAutoDetach(pObject, name)) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
@@ -474,7 +492,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
-    // Execute Logic Check
+    // Execute Logic Check (Safety Wrapper)
     __try { Present_Logic(); }
     __except (EXCEPTION_EXECUTE_HANDLER) { g_bIsSafe = false; }
 
@@ -486,8 +504,9 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
             static bool bHasAutoOpened = false;
 
+            // [LOGIC] Only Draw Menu/Cursor when Safe (In-Game)
             if (g_bIsSafe) {
-                // In-Game Mode
+                // Auto-Open on first load
                 if (!bHasAutoOpened) {
                     g_ShowMenu = true;
                     bHasAutoOpened = true;
@@ -502,11 +521,12 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 }
             }
             else {
-                // Main Menu / Transition Mode
+                // Not Safe (Menu/Loading)
                 bHasAutoOpened = false;
                 ImGui::GetIO().MouseDrawCursor = false;
 
-                // Only draw overlay if memory looks valid enough
+                // Simple "Jarvis" Text Overlay
+                // Only draw if GObjects pointer itself isn't garbage
                 if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
                     ImGui::SetNextWindowPos(ImVec2(10, 10));
                     ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);

@@ -50,7 +50,9 @@ namespace Features {
     }
 
     void RunLoop_Logic() {
+        // [SAFETY] ABSOLUTE KILL SWITCH
         if (!g_bIsSafe) return;
+
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
         SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
