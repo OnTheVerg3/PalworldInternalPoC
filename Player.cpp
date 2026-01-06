@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <unordered_map>
 
+// Access external safe flag
+extern std::atomic<bool> g_bIsSafe;
+
 namespace Player
 {
     // --- DEFAULTS ---
@@ -24,7 +27,6 @@ namespace Player
     ULONGLONG g_LastCollectTime = 0;
     const ULONGLONG COLLECTION_INTERVAL_MS = 250;
 
-    // [FIX] Global Cache for UFunctions
     std::unordered_map<std::string, SDK::UFunction*> g_PlayerFuncCache;
 
     // --- INTERNAL HELPERS ---
@@ -39,9 +41,6 @@ namespace Player
     void CallFn(SDK::UObject* obj, const char* fnName, void* params = nullptr) {
         if (!IsValidObject(obj)) return;
 
-        // [CRITICAL FIX] Use map cache instead of static local
-        // Static local would only initialize ONCE for the first fnName called, breaking all others.
-
         SDK::UFunction* fn = nullptr;
         auto it = g_PlayerFuncCache.find(fnName);
         if (it != g_PlayerFuncCache.end()) {
@@ -52,40 +51,42 @@ namespace Player
             if (fn) g_PlayerFuncCache[fnName] = fn;
         }
 
-        if (fn) obj->ProcessEvent(fn, params);
+        if (fn && IsValidObject(fn)) obj->ProcessEvent(fn, params);
     }
 
-    // --- RESET FUNCTION ---
     void Reset() {
         g_RelicCache.clear();
-
-        // [CRITICAL FIX] Clear UFunction cache on world exit
         g_PlayerFuncCache.clear();
-
         bCollectRelics = false;
         std::cout << "[Player] Cache cleared and features reset." << std::endl;
     }
 
-    // --- MAIN LOOP ---
     void Update(SDK::APalPlayerCharacter* pLocal)
     {
-        ProcessAttributes(pLocal);
+        if (!g_bIsSafe || !IsValidObject(pLocal)) return;
 
-        if (bUnlockMap) {
-            UnlockAllMap(pLocal);
-            bUnlockMap = false;
-        }
+        __try {
+            ProcessAttributes(pLocal);
 
-        if (bUnlockTowers) {
-            UnlockAllTowers(pLocal);
-            bUnlockTowers = false;
-        }
+            if (bUnlockMap) {
+                UnlockAllMap(pLocal);
+                bUnlockMap = false;
+            }
 
-        if (bCollectRelics) {
-            TeleportRelicsToPlayer(pLocal);
+            if (bUnlockTowers) {
+                UnlockAllTowers(pLocal);
+                bUnlockTowers = false;
+            }
+
+            if (bCollectRelics) {
+                TeleportRelicsToPlayer(pLocal);
+            }
+            else {
+                if (!g_RelicCache.empty()) g_RelicCache.clear();
+            }
         }
-        else {
-            if (!g_RelicCache.empty()) g_RelicCache.clear();
+        __except (1) {
+            // Logic exception (Exit detected)
         }
     }
 
@@ -119,55 +120,49 @@ namespace Player
 
     void UnlockAllMap(SDK::APalPlayerCharacter* pLocal)
     {
-        if (!SDK::UObject::GObjects) return;
+        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
         std::cout << "[Jarvis] Revealing Map..." << std::endl;
 
-        __try {
-            for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
-                SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
-                if (!IsValidObject(Obj)) continue;
+        for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
+            SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
+            if (!IsValidObject(Obj)) continue;
 
-                char nameBuf[256];
-                GetNameSafe(Obj, nameBuf, sizeof(nameBuf));
-                if (strstr(nameBuf, "PalGameSetting") && !strstr(nameBuf, "Default__")) {
-                    SDK::UPalGameSetting* pSettings = static_cast<SDK::UPalGameSetting*>(Obj);
-                    pSettings->worldmapUIMaskClearSize = 20000.0f;
-                }
+            char nameBuf[256];
+            GetNameSafe(Obj, nameBuf, sizeof(nameBuf));
+            if (strstr(nameBuf, "PalGameSetting") && !strstr(nameBuf, "Default__")) {
+                SDK::UPalGameSetting* pSettings = static_cast<SDK::UPalGameSetting*>(Obj);
+                pSettings->worldmapUIMaskClearSize = 20000.0f;
             }
         }
-        __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
     void UnlockAllTowers(SDK::APalPlayerCharacter* pLocal)
     {
-        if (!SDK::UObject::GObjects) return;
+        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
         std::cout << "[Jarvis] Unlocking Fast Travel..." << std::endl;
 
         bool bIsAuthority = false;
-        if (pLocal->Controller) bIsAuthority = pLocal->Controller->HasAuthority();
+        if (pLocal->Controller && IsValidObject(pLocal->Controller)) bIsAuthority = pLocal->Controller->HasAuthority();
 
-        __try {
-            for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
-                SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
-                if (!IsValidObject(Obj)) continue;
+        for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
+            SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
+            if (!IsValidObject(Obj)) continue;
 
-                if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
-                    auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
-                    if (FT->bUnlocked) continue;
+            if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
+                auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
+                if (FT->bUnlocked) continue;
 
-                    if (bIsAuthority) {
-                        FT->OnTriggerInteract(pLocal, SDK::EPalInteractiveObjectIndicatorType::UnlockFastTravel);
-                    }
-                    else {
-                        SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
-                        if (IsValidObject(PalPC) && IsValidObject(PalPC->Transmitter) && IsValidObject(PalPC->Transmitter->Player)) {
-                            PalPC->Transmitter->Player->RequestUnlockFastTravelPoint_ToServer(FT->FastTravelPointID);
-                        }
+                if (bIsAuthority) {
+                    FT->OnTriggerInteract(pLocal, SDK::EPalInteractiveObjectIndicatorType::UnlockFastTravel);
+                }
+                else {
+                    SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
+                    if (IsValidObject(PalPC) && IsValidObject(PalPC->Transmitter) && IsValidObject(PalPC->Transmitter->Player)) {
+                        PalPC->Transmitter->Player->RequestUnlockFastTravelPoint_ToServer(FT->FastTravelPointID);
                     }
                 }
             }
         }
-        __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
 
     void TeleportRelicsToPlayer(SDK::APalPlayerCharacter* pLocal)
@@ -183,25 +178,18 @@ namespace Player
 
         if (g_RelicCache.empty()) {
             std::cout << "[Jarvis] Single-Pass Scan initiated..." << std::endl;
-            __try {
-                if (SDK::UObject::GObjects) {
-                    for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
-                        SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
-                        if (!IsValidObject(Obj)) continue;
+            if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
+                for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
+                    SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
+                    if (!IsValidObject(Obj)) continue;
 
-                        if (IsClass(Obj, "PalLevelObjectRelic") || IsClass(Obj, "BP_LevelObject_Relic_C")) {
-                            SDK::APalLevelObjectObtainable* Relic = static_cast<SDK::APalLevelObjectObtainable*>(Obj);
-                            if (!Relic->bPickedInClient) {
-                                g_RelicCache.push_back(Relic);
-                            }
+                    if (IsClass(Obj, "PalLevelObjectRelic") || IsClass(Obj, "BP_LevelObject_Relic_C")) {
+                        SDK::APalLevelObjectObtainable* Relic = static_cast<SDK::APalLevelObjectObtainable*>(Obj);
+                        if (!Relic->bPickedInClient) {
+                            g_RelicCache.push_back(Relic);
                         }
                     }
                 }
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                g_RelicCache.clear();
-                bCollectRelics = false;
-                return;
             }
 
             std::cout << "[Jarvis] Scan Complete. Found: " << g_RelicCache.size() << std::endl;

@@ -76,6 +76,8 @@ void InitModuleBounds() {
     }
 }
 
+// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
+
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -215,13 +217,9 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. CRITICAL VALIDATION [Fixes 0xFF, 0x3d, and 0x3f80... Crashes]
-    // We strictly filter garbage/sentinel/zombie pointers FIRST.
-    // If an object fails this check, it is unusable and MUST be dropped.
-    // NOTE: Valid objects being destroyed will PASS this check.
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction) || !IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
-    }
+    // 1. GARBAGE FILTER (Always Active)
+    // Filters Sentinels (0xFF) and NULLs. Prevents 0xFF crashes.
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
     // 2. GET FUNCTION NAME
     char name[256];
@@ -246,12 +244,16 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     // If we are shutting down (and it's not a destruction event), drop it.
     if (!g_bIsSafe) return;
 
-    // 5. WHITE-LIST FILTER
+    // 5. STRICT VALIDATION (Safe Mode)
+    // We are in-game. Ensure objects are strictly valid (No Zombies).
+    if (!IsValidObject(pObject)) return;
+
+    // 6. WHITE-LIST FILTER
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 6. CHEAT LOGIC
+    // 7. CHEAT LOGIC
     bool bBlock = false;
     __try {
         bBlock = ProcessEvent_Logic(pObject, pFunction, name);
@@ -397,45 +399,54 @@ void AttachPlayerHooks_Logic() {
 }
 
 void Present_Logic() {
-    ULONGLONG CurrentTime = GetTickCount64();
-    SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
+    __try {
+        ULONGLONG CurrentTime = GetTickCount64();
 
-    if (!pLocal) {
-        g_bIsSafe = false;
+        // 1. Get Player Safely
+        SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
 
-        g_pLocal = nullptr;
-        g_pController = nullptr;
-        g_pParam = nullptr;
+        // 2. Validate Player. If invalid, unsafe.
+        if (!pLocal || !IsValidObject(pLocal)) {
+            g_bIsSafe = false;
 
-        if (g_TimePlayerLost == 0) g_TimePlayerLost = CurrentTime;
+            // Cleanup Logic
+            g_pLocal = nullptr;
+            g_pController = nullptr;
+            g_pParam = nullptr;
 
-        if ((CurrentTime - g_TimePlayerLost) > 1000) {
-            if (g_LastLocalPlayer != nullptr) {
-                PerformWorldExit();
-                g_TimePlayerDetected = 0;
+            if (g_TimePlayerLost == 0) g_TimePlayerLost = CurrentTime;
+
+            if ((CurrentTime - g_TimePlayerLost) > 1000) {
+                if (g_LastLocalPlayer != nullptr) {
+                    PerformWorldExit();
+                    g_TimePlayerDetected = 0;
+                }
             }
+            return;
         }
-        return;
-    }
 
-    g_TimePlayerLost = 0;
+        g_TimePlayerLost = 0;
 
-    if (g_TimePlayerDetected == 0) {
-        g_TimePlayerDetected = CurrentTime;
-        std::cout << "[System] Player detected. Stabilizing..." << std::endl;
+        if (g_TimePlayerDetected == 0) {
+            g_TimePlayerDetected = CurrentTime;
+            std::cout << "[System] Player detected. Stabilizing..." << std::endl;
+        }
+        if ((CurrentTime - g_TimePlayerDetected) < 3000) {
+            g_bIsSafe = false;
+            return;
+        }
+
+        // 3. Game is Stable.
+        g_bIsSafe = true;
+        AttachPlayerHooks_Logic();
+
+        Features::RunLoop();
+        Player::Update(pLocal);
     }
-    if ((CurrentTime - g_TimePlayerDetected) < 3000) {
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Fallback catch
         g_bIsSafe = false;
-        return;
     }
-
-    g_bIsSafe = true;
-    AttachPlayerHooks_Logic();
-
-    __try { Features::RunLoop(); }
-    __except (1) {}
-    __try { Player::Update(pLocal); }
-    __except (1) {}
 }
 
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
@@ -465,8 +476,8 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
-    __try { Present_Logic(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    // Logic Loop (Wrapped)
+    Present_Logic();
 
     __try {
         if (g_mainRenderTargetView) {
@@ -481,13 +492,8 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                     Menu::Draw();
                 }
                 else {
-                    bool bGlobalsValid = false;
-                    // Safe Cast
+                    // Safe Overlay
                     if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
-                        bGlobalsValid = true;
-                    }
-
-                    if (bGlobalsValid) {
                         ImGui::SetNextWindowPos(ImVec2(10, 10));
                         ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
                         ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
