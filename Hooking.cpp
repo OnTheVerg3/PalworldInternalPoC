@@ -244,8 +244,9 @@ bool HasValidVTable(void* pObject) {
         // Garbage Filter
         if (IsGarbagePtr(vtable)) return false;
 
-        // Address Range Filter
-        if ((uintptr_t)vtable < 0x10000) return false;
+        // [FIX] Increased threshold to 0x10000000 (256MB)
+        // This effectively blocks "float-as-pointer" garbage like 0x3d9c04
+        if ((uintptr_t)vtable < 0x10000000) return false;
 
         // Alignment Filter (Ptrs are 8-byte aligned)
         if ((uintptr_t)vtable % 8 != 0) return false;
@@ -264,8 +265,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
         // 2. VTABLE SANITY (The "Zombie" Filter)
-        // [CRITICAL] We drop bad objects HERE. 
-        // If we don't, the engine crashes reading -1 (0xFF...) later.
+        // We drop bad objects HERE. 
         if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
             return; // Drop Zombie
         }
