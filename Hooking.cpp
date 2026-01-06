@@ -179,6 +179,7 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         g_ShowMenu = !g_ShowMenu;
 
         // Only capture mouse if In-Game. 
+        // In Main Menu, g_bIsSafe is false, so we never trap the cursor.
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
@@ -258,29 +259,32 @@ bool HasValidVTable(void* pObject) {
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
+    // WRAP EVERYTHING IN EXCEPTION HANDLER
     __try {
-        // 1. GARBAGE FILTER (Pointer Itself)
+        // 1. GARBAGE FILTER [ABSOLUTE PRIORITY]
+        // Checks pointer alignment and bounds. Does NOT dereference.
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
-            return; // Drop bad pointers
+            return;
         }
 
-        // 2. VTABLE SANITY (The "Zombie" Filter)
-        // [CRITICAL] This must happen BEFORE any pass-through.
-        // Even in Unsafe Mode, we cannot pass objects with invalid VTables.
-        // This stops the 0xFFFFFFFFFFFFFFFF crash.
+        // 2. VTABLE SANITY CHECK [FIX FOR 0xFF CRASH]
+        // We MUST verify the VTable is valid BEFORE passing to oProcessEvent.
+        // Even in "Unsafe Mode", we cannot pass a Zombie (0xFF vtable) to the engine.
         if (!HasValidVTable(pObject)) {
             return; // Drop Zombie Objects
         }
 
-        // 3. UNSAFE MODE "TRY-PASS" (Soft Detach)
-        // If exiting, we pass everything VALID to the engine.
-        // We wrap it in a try-catch so if the engine *does* crash, we catch it.
+        // 3. UNSAFE MODE "TRY-PASS" [FIX FOR FREEZE]
+        // Now that we know the object is physically valid (has a VTable), 
+        // if we are in Shutdown/Unsafe Mode, we PASS it. 
+        // This allows valid objects to clean up (EndPlay), preventing the freeze.
         if (!g_bIsSafe) {
             __try {
                 return oProcessEvent(pObject, pFunction, pParams);
             }
             __except (1) {
-                return; // Swallow engine crash during exit
+                // If it crashes here, the engine couldn't handle it. Swallow it.
+                return;
             }
         }
 
@@ -317,7 +321,8 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Fallback: Drop the call if our logic crashed.
+        // [CRITICAL] If we crash anywhere above (e.g. reading a dying object's name),
+        // we DROP the call. Do NOT retry oProcessEvent.
         return;
     }
 }
