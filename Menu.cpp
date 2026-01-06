@@ -7,7 +7,8 @@
 #include "SDKGlobal.h"
 #include "imgui_style.h"
 
-SDK::APalPlayerCharacter* g_pLocal = nullptr;
+// [FIX] Removed duplicate definition of g_pLocal. 
+// It is now an extern from Hooking.h
 
 // Static internal state
 static int selectedTab = 0;
@@ -16,7 +17,6 @@ void Menu::InitTheme() {
     SetupImGuiStyle();
 }
 
-// [NEW] Reset Implementation
 void Menu::Reset() {
     selectedTab = 0;
 }

@@ -25,12 +25,15 @@ VMTHook g_ParamHook;
 std::mutex g_HookMutex;
 
 // --- FAST ACCESS CACHE ---
+// [FIX] This is the ONE TRUE DEFINITION of g_pLocal.
 SDK::APalPlayerCharacter* g_pLocal = nullptr;
 SDK::UObject* g_pController = nullptr;
 SDK::UObject* g_pParam = nullptr;
 
 // Flags
-bool g_bIsSafe = false;
+// [FIX] Changed to std::atomic to match the extern declaration in Features.cpp
+std::atomic<bool> g_bIsSafe(false);
+
 bool g_ShowMenu = false;
 bool g_bHasAutoOpened = false;
 
@@ -96,8 +99,6 @@ bool RawStrContains(const char* haystack, const char* needle) {
 }
 
 // --- CLEANUP (RESTORE ORIGINAL STATE) ---
-// [CRITICAL] This restores the Original VTables. 
-// The engine will now see the vanilla object and can destroy it safely.
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
@@ -178,39 +179,31 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 
 // --- THE HOOK CALLBACK ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
-    // 1. Identify which Original Function to call
     ProcessEvent_t oFunc = nullptr;
     if (pObject == g_pLocal) oFunc = g_PawnHook.GetOriginal<ProcessEvent_t>(67);
     else if (pObject == g_pController) oFunc = g_ControllerHook.GetOriginal<ProcessEvent_t>(67);
     else if (pObject == g_pParam) oFunc = g_ParamHook.GetOriginal<ProcessEvent_t>(67);
 
-    // If we hooked an object but can't find original, CRITICAL FAILURE -> Return.
     if (!oFunc) return;
 
     __try {
-        // 2. Validate
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
 
-        // 3. Check for Exit
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
         if (name[0] != '\0') {
             if (CheckAndPerformAutoDetach(pObject, name)) {
-                // We just restored the VTable. 
-                // Calling oFunc is still safe because we have the pointer recorded.
                 return oFunc(pObject, pFunction, pParams);
             }
 
-            // 4. Run Logic
             if (g_bIsSafe) {
-                if (ProcessEvent_Logic(pObject, pFunction, name)) return; // Block
+                if (ProcessEvent_Logic(pObject, pFunction, name)) return;
             }
         }
 
         return oFunc(pObject, pFunction, pParams);
     }
     __except (1) {
-        // If we crash inside our logic, fall back to original
         return oFunc(pObject, pFunction, pParams);
     }
 }
@@ -243,7 +236,6 @@ void AttachPlayerHooks_Logic() {
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) return;
 
-    // Detect new player
     if (pLocal != g_LastLocalPlayer) {
         std::cout << "[System] New Player Detected. Attaching VMT Hooks." << std::endl;
 
@@ -255,7 +247,6 @@ void AttachPlayerHooks_Logic() {
         g_pController = pLocal->Controller;
         g_pParam = pLocal->CharacterParameterComponent;
 
-        // --- APPLY VMT HOOKS ---
         if (g_PawnHook.Init(pLocal)) {
             g_PawnHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
             std::cout << "[+] Pawn Hooked (VMT)" << std::endl;

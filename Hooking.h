@@ -4,6 +4,7 @@
 #include <dxgi.h>
 #include <vector>
 #include <cstdint>
+#include <atomic> // [FIX] Required for std::atomic
 #include "SDKGlobal.h"
 #include "VMTHook.h" 
 
@@ -11,13 +12,18 @@
 extern uintptr_t g_GameBase;
 extern uintptr_t g_GameSize;
 
+// --- SHARED GLOBALS [FIX] ---
+// These allow Menu.cpp, Features.cpp, and Player.cpp to see the variables defined in Hooking.cpp
+extern std::atomic<bool> g_bIsSafe;
+extern SDK::APalPlayerCharacter* g_pLocal;
+
 // --- MEMORY SAFETY ---
 inline bool IsSentinel(void* ptr) { return (uintptr_t)ptr == 0xFFFFFFFFFFFFFFFF; }
 inline bool IsGarbagePtr(void* ptr) {
     uintptr_t addr = (uintptr_t)ptr;
     if (!ptr) return true;
     if (IsSentinel(ptr)) return true;
-    if (addr < 0x10000000) return true; // Hardened Threshold
+    if (addr < 0x10000000) return true;
     if (addr > 0x7FFFFFFFFFFF) return true;
     if (addr % 8 != 0) return true;
     return false;
@@ -40,7 +46,6 @@ inline bool IsValidObject(SDK::UObject* pObj) {
 
 void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size);
 
-// Expose VMT Hooks so we can restore them on exit
 extern VMTHook g_PawnHook;
 extern VMTHook g_ControllerHook;
 extern VMTHook g_ParamHook;
