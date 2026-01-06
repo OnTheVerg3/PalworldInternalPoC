@@ -184,18 +184,7 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
 // --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
-
-    // [CRITICAL] DETECT SELF-DESTRUCTION
-    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
-        if (pObject == g_pLocal) {
-            g_pLocal = nullptr;
-            g_pController = nullptr;
-            g_pParam = nullptr;
-            g_bIsSafe = false;
-        }
-        return false;
-    }
-
+    // This logic only runs if g_bIsSafe is TRUE
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
             Hooking::bFoundValidTraffic = true;
@@ -229,40 +218,48 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. GARBAGE FILTER
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
-        return;
-    }
+    // 1. GARBAGE FILTER (Always Active)
+    // Filters Sentinels (0xFF) and NULLs. Prevents 0xFF crashes.
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-    // 2. UNSAFE MODE (Pass-Through)
-    // If shutting down/loading, pass blindly to engine. No validation logic.
-    if (!g_bIsSafe) {
+    // 2. GET FUNCTION NAME (Safely)
+    char name[256];
+    GetNameSafe(pFunction, name, sizeof(name));
+
+    // If we can't get a name, the object/function is likely corrupt. Drop it.
+    if (name[0] == '\0') return;
+
+    // 3. DESTRUCTION CHECK (High Priority)
+    // We MUST pass these events to the engine, even if Unsafe, to prevent Freezes.
+    bool bIsDestruction = RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay");
+
+    if (bIsDestruction) {
+        if (pObject == g_pLocal) {
+            g_pLocal = nullptr;
+            g_pController = nullptr;
+            g_pParam = nullptr;
+            g_bIsSafe = false;
+        }
+        // Pass to engine so it can clean up
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 3. WORLD VALIDITY
-    if (!SDK::pGWorld || !*SDK::pGWorld) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
+    // 4. UNSAFE MODE FILTER
+    // If we are shutting down, and it wasn't a Destruction event (checked above),
+    // then it's a random gameplay event attempting to run on dead memory.
+    // DROP IT to prevent 0xFF/0x8 crashes.
+    if (!g_bIsSafe) return;
 
-    // 4. STRICT VALIDATION
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
-    }
+    // 5. STRICT VALIDATION (Safe Mode)
+    // We are in-game. Ensure objects are strictly valid (No Zombies).
+    if (!IsValidObject(pObject)) return;
 
-    // 5. WHITE-LIST FILTER
+    // 6. WHITE-LIST FILTER
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 6. SAFE MODE LOGIC
-    char name[256];
-    GetNameSafe(pFunction, name, sizeof(name));
-
-    if (name[0] == '\0') {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
+    // 7. CHEAT LOGIC
     bool bBlock = false;
     __try {
         bBlock = ProcessEvent_Logic(pObject, pFunction, name);
@@ -489,18 +486,24 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (g_ShowMenu) {
                 ImGui::GetIO().MouseDrawCursor = true;
 
-                // [CRITICAL FIX] MENU SAFETY
-                // Menu only draws when we are DEFINITELY in-game and safe.
-                // Prevents 0xFF/0x8 crashes during world transition.
                 if (g_bIsSafe) {
                     Menu::Draw();
                 }
                 else {
-                    // Safe Overlay - No SDK Access
-                    ImGui::SetNextWindowPos(ImVec2(10, 10));
-                    ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-                    ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World to Access Menu");
-                    ImGui::End();
+                    // [FIX] Validate GObjects Pointer casting to bypass Error E0413
+                    // We only attempt to draw if the game structure is valid
+                    bool bGlobalsValid = false;
+                    if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
+                        bGlobalsValid = true;
+                    }
+
+                    if (bGlobalsValid) {
+                        // Draw "Safe" Overlay
+                        ImGui::SetNextWindowPos(ImVec2(10, 10));
+                        ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
+                        ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
+                        ImGui::End();
+                    }
                 }
             }
             else {

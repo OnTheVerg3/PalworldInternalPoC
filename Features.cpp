@@ -31,7 +31,7 @@ namespace Features {
     SDK::APalWeaponBase* g_LastWeapon = nullptr;
     WeaponBackup g_OriginalStats;
 
-    // [FIX] Global Cache for Functions (cleared on World Exit)
+    // Global Cache
     std::unordered_map<std::string, SDK::UFunction*> g_FuncCache;
 
     void Reset() {
@@ -45,6 +45,7 @@ namespace Features {
         auto it = g_FuncCache.find(name);
         if (it != g_FuncCache.end()) return it->second;
 
+        // [SAFETY] Double check GObjects
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return nullptr;
 
         SDK::UFunction* fn = SDK::UObject::FindObject<SDK::UFunction>(name);
@@ -53,9 +54,8 @@ namespace Features {
     }
 
     void RunLoop_Logic() {
-        // [FIX] Abort if unsafe/exit mode
+        // [SAFETY] Abort if unsafe
         if (!g_bIsSafe) return;
-
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
         SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
@@ -87,6 +87,7 @@ namespace Features {
             if (pWeapon->ownWeaponStaticData && !IsBadReadPtr(pWeapon->ownWeaponStaticData, 8)) {
 
                 if (g_LastWeapon != pWeapon) {
+                    // [FIX] Use IsBadReadPtr to avoid C3861
                     if (g_LastWeapon && !IsBadReadPtr(g_LastWeapon, 8) && g_LastWeapon->ownWeaponStaticData && g_OriginalStats.bSaved) {
                         g_LastWeapon->ownWeaponStaticData->AttackValue = g_OriginalStats.Attack;
                     }

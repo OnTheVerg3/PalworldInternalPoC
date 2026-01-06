@@ -41,11 +41,10 @@ inline bool IsValidObject(SDK::UObject* pObj) {
 
         if (IsGarbagePtr(vtable)) return false;
 
-        // VTables must be in the module (prevents 0x3d... Heap crash)
         if (g_GameBase != 0 && g_GameSize != 0) {
             uintptr_t vtAddr = (uintptr_t)vtable;
             if (vtAddr < g_GameBase || vtAddr >(g_GameBase + g_GameSize)) {
-                return false; // Zombie!
+                return false;
             }
         }
     }
