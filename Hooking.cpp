@@ -156,11 +156,21 @@ void PerformWorldExit() {
 
 // --- AUTO-DETACH HELPER ---
 bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
-    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
-        if (pObject == g_pLocal) {
-            std::cout << "[Jarvis] World Exit Detected. Detaching Hooks..." << std::endl;
+    // [FIX] Expanded Trigger List
+    // 1. "ReceiveEndPlay" - Blueprint version of EndPlay
+    // 2. "ReceiveDestroyed" - Blueprint version of Destroyed
+    // 3. "ClientReturnToMainMenu" - PlayerController exit command
+    // 4. "ClientTravel" - Level transition command
+    if (RawStrContains(name, "ReceiveDestroyed") ||
+        RawStrContains(name, "ReceiveEndPlay") ||
+        RawStrContains(name, "ClientReturnToMainMenu") ||
+        RawStrContains(name, "ClientTravel")) {
 
-            // Disable hooks immediately
+        // If it's the Player OR Controller triggering this, we bail.
+        if (pObject == g_pLocal || pObject == g_pController) {
+            std::cout << "[Jarvis] World Exit/Travel Detected. Detaching Hooks..." << std::endl;
+
+            // Disable hooks
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
                 for (void* pHook : g_ActiveHooks) {
@@ -242,46 +252,37 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. GARBAGE FILTER [CRITICAL]
-    // We MUST filter 0xFF (Sentinel) and NULLs before anything else.
-    // Passing these to the engine causes the 0xFF crash.
+    // 1. GARBAGE FILTER [ABSOLUTE PRIORITY]
+    // Drops 0xFF, NULL, and unaligned pointers instantly.
+    // This PREVENTS the crash reading 0xffffffffffffffff.
     if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
         return;
     }
 
-    // 2. VTABLE SANITY CHECK [Fixes Zombie Crash]
-    // Check if the VTable itself is garbage.
-    // NOTE: We do NOT use strict IsValidObject here because it blocks DLL objects (Freeze).
-    // We just ensure the pointer points to readable memory.
-    bool bVTableValid = false;
-    __try {
-        void* vtable = *(void**)pObject;
-        if (!IsGarbagePtr(vtable)) {
-            bVTableValid = true;
-        }
-    }
-    __except (1) { bVTableValid = false; }
-
-    if (!bVTableValid) return; // Drop bad objects
-
-    // 3. UNSAFE BYPASS [Fixes Freeze]
-    // Now that we know the object is physically valid (not garbage),
-    // if we are in Unsafe Mode, we PASS it. This lets valid objects clean up.
+    // 2. UNSAFE MODE BYPASS (Soft Detach)
+    // If exit was detected, we pass EVERYTHING to the engine to allow cleanup.
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. WHITELIST OPTIMIZATION
+    // 3. WHITELIST OPTIMIZATION
+    // Only process our objects.
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 5. GET NAME & CHECK EXIT
+    // 4. VTABLE & MODULE CHECK
+    // Ensure object is valid code execution target.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return;
+    }
+
+    // 5. GET NAME & CHECK FOR EXIT
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
     if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
 
-    // If we detect destruction, disable hooks, set Unsafe, and pass-through
+    // [FIX] Enhanced Trigger Detection
     if (CheckAndPerformAutoDetach(pObject, name)) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
