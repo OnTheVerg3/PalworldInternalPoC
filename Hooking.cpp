@@ -182,16 +182,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
 // --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
-    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
-        if (pObject == g_pLocal) {
-            g_pLocal = nullptr;
-            g_pController = nullptr;
-            g_pParam = nullptr;
-            g_bIsSafe = false;
-        }
-        return false;
-    }
-
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
             Hooking::bFoundValidTraffic = true;
@@ -225,35 +215,29 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. ZOMBIE FILTER [TOP PRIORITY]
-    // Filter out Sentinels (-1), NULLs, and Heap Zombies (invalid VTables).
-    // This stops the Crashes.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
-    }
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-    // 2. UNSAFE MODE PASS-THROUGH [Prevents Freeze]
-    // If we are shutting down (Unsafe), and the object passed validation (it's real),
-    // we MUST let the engine process it. This clears the event queue and prevents deadlock.
-    if (!g_bIsSafe) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 3. WORLD VALIDITY CHECK
-    if (!SDK::pGWorld || !*SDK::pGWorld) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 4. WHITE-LIST FILTER
-    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 5. SAFE MODE LOGIC
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
+    if (name[0] == '\0') return;
 
-    if (name[0] == '\0') {
+    bool bIsDestruction = RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay");
+
+    if (bIsDestruction) {
+        if (pObject == g_pLocal) {
+            g_pLocal = nullptr;
+            g_pController = nullptr;
+            g_pParam = nullptr;
+            g_bIsSafe = false;
+        }
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
+    if (!g_bIsSafe) return;
+
+    if (!IsValidObject(pObject)) return;
+
+    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
@@ -382,11 +366,19 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
-    if (g_bPawnHooked && g_bControllerHooked && g_bParamHooked) return;
-
+    // [CRITICAL FIX] CHECK FOR PLAYER INSTANCE SWAP
+    // If the player pointer changed since last frame, it means we loaded a new world.
+    // We MUST force a reset of the Feature caches to remove stale UFunctions.
     if (pLocal != g_LastLocalPlayer) {
+        if (g_LastLocalPlayer != nullptr) {
+            std::cout << "[System] World Transition Detected (Player Ptr Change). Flushing Caches." << std::endl;
+            Features::Reset();
+            Player::Reset();
+        }
         g_LastLocalPlayer = pLocal;
     }
+
+    if (g_bPawnHooked && g_bControllerHooked && g_bParamHooked) return;
 
     if (!g_bPawnHooked) {
         if (HookIndex(pLocal, 67, "Pawn")) g_bPawnHooked = true;
