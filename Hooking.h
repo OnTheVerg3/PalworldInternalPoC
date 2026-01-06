@@ -5,7 +5,7 @@
 #include <vector>
 #include <cstdint>
 #include "SDKGlobal.h"
-[cite_start]#include "VMTHook.h" // [cite: 4] Using the VMTHook class you uploaded
+#include "VMTHook.h" 
 
 // --- GLOBAL BOUNDS ---
 extern uintptr_t g_GameBase;
@@ -40,7 +40,7 @@ inline bool IsValidObject(SDK::UObject* pObj) {
 
 void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size);
 
-// [NEW] Expose VMT Hooks so we can restore them on exit
+// Expose VMT Hooks so we can restore them on exit
 extern VMTHook g_PawnHook;
 extern VMTHook g_ControllerHook;
 extern VMTHook g_ParamHook;

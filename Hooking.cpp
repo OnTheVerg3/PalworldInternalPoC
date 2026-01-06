@@ -12,7 +12,7 @@
 #include <algorithm>
 #include <atomic>
 #include <mutex> 
-[cite_start]#include <psapi.h> // [cite: 4] Required for MODULEINFO
+#include <psapi.h> 
 
 #pragma comment(lib, "psapi.lib")
 
@@ -69,14 +69,25 @@ void InitModuleBounds() {
 }
 
 // Helper to safely get names
-__declspec(noinline) void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
+__declspec(noinline) void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
+    std::string s = pObject->GetName();
+    if (s.length() < size) {
+        strcpy_s(outBuf, size, s.c_str());
+    }
+    else {
+        strncpy_s(outBuf, size, s.c_str(), size - 1);
+    }
+}
+
+void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     memset(outBuf, 0, size);
     if (!IsValidObject(pObject)) return;
     __try {
-        std::string s = pObject->GetName();
-        if (s.length() < size) strcpy_s(outBuf, size, s.c_str());
+        GetNameInternal(pObject, outBuf, size);
     }
-    __except (1) { memset(outBuf, 0, size); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        memset(outBuf, 0, size);
+    }
 }
 
 bool RawStrContains(const char* haystack, const char* needle) {
@@ -94,7 +105,6 @@ __declspec(noinline) void PerformWorldExit() {
     g_HookMutex.lock();
 
     // 1. Restore VTables (Unhook instantly)
-    // This solves the crash/freeze logic: We are no longer intercepting calls.
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
     g_ParamHook.Restore();
@@ -106,9 +116,9 @@ __declspec(noinline) void PerformWorldExit() {
     g_LastLocalPlayer = nullptr;
 
     // 3. Reset Features
-    Features::Reset(); [cite_start]// [cite: 1]
-        Player::Reset(); [cite_start]// [cite: 2]
-        Menu::Reset();
+    Features::Reset();
+    Player::Reset();
+    Menu::Reset();
 
     g_HookMutex.unlock();
 
@@ -126,8 +136,8 @@ __declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const
         RawStrContains(name, "ClientTravel"))
     {
         if (pObject == g_pLocal || pObject == g_pController) {
-            std::cout << "[Jarvis] Exit detected via: " << name << std::endl; [cite_start]// [cite: 1]
-                PerformWorldExit();
+            std::cout << "[Jarvis] Exit detected via: " << name << std::endl;
+            PerformWorldExit();
             return true;
         }
     }
@@ -233,11 +243,11 @@ void AttachPlayerHooks_Logic() {
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) return;
 
-    // Detect new player (Load)
+    // Detect new player
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] New Player Detected. Attaching VMT Hooks." << std::endl; [cite_start]// [cite: 1]
+        std::cout << "[System] New Player Detected. Attaching VMT Hooks." << std::endl;
 
-            g_HookMutex.lock();
+        g_HookMutex.lock();
         Features::Reset();
         Player::Reset();
 
@@ -246,19 +256,16 @@ void AttachPlayerHooks_Logic() {
         g_pParam = pLocal->CharacterParameterComponent;
 
         // --- APPLY VMT HOOKS ---
-        // 1. Pawn
         if (g_PawnHook.Init(pLocal)) {
             g_PawnHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
             std::cout << "[+] Pawn Hooked (VMT)" << std::endl;
         }
 
-        // 2. Controller
         if (IsValidObject(g_pController) && g_ControllerHook.Init(g_pController)) {
             g_ControllerHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
             std::cout << "[+] Controller Hooked (VMT)" << std::endl;
         }
 
-        // 3. Param
         if (IsValidObject(g_pParam) && g_ParamHook.Init(g_pParam)) {
             g_ParamHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
             std::cout << "[+] Param Hooked (VMT)" << std::endl;
@@ -274,15 +281,12 @@ void Present_Logic() {
 
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) {
-        // If we lost the player, force exit state
-        if (g_LastLocalPlayer != nullptr) {
-            PerformWorldExit();
-        }
+        if (g_LastLocalPlayer != nullptr) PerformWorldExit();
         return;
     }
 
     g_bIsSafe = true;
-    AttachPlayerHooks_Logic(); // Checks for new player and hooks if needed
+    AttachPlayerHooks_Logic();
 
     g_HookMutex.lock();
     __try { Features::RunLoop(); }
@@ -322,7 +326,6 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     __try { Present_Logic(); }
     __except (1) { g_bIsSafe = false; }
 
-    // UI Rendering
     if (g_mainRenderTargetView) {
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
@@ -353,7 +356,6 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 }
 
 void Hooking::Init() {
-    // [FIX] Restored DX11 Dummy Device code so presentAddr is defined
     WNDCLASSEX wc = { sizeof(WNDCLASSEX), CS_CLASSDC, DefWindowProc, 0L, 0L, GetModuleHandle(NULL), NULL, NULL, NULL, NULL, "DX11 Dummy", NULL };
     RegisterClassEx(&wc);
     HWND hWnd = CreateWindow("DX11 Dummy", NULL, WS_OVERLAPPEDWINDOW, 100, 100, 300, 300, NULL, NULL, wc.hInstance, NULL);
@@ -366,14 +368,13 @@ void Hooking::Init() {
     if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, levels, 1, D3D11_SDK_VERSION, &scd, &swap, &dev, NULL, &ctx))) {
         DWORD_PTR* vtable = (DWORD_PTR*)swap;
         vtable = (DWORD_PTR*)vtable[0];
-        void* presentAddr = (void*)vtable[8]; [cite_start]// [cite: 4] Fixed undefined identifier
+        void* presentAddr = (void*)vtable[8];
 
-            swap->Release(); dev->Release(); ctx->Release();
+        swap->Release(); dev->Release(); ctx->Release();
         DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
 
         if (MH_Initialize() == MH_OK) {
             InitModuleBounds();
-            // Only MinHook 'Present'. ProcessEvent is handled via VMT.
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
             MH_EnableHook(MH_ALL_HOOKS);
         }
@@ -381,15 +382,12 @@ void Hooking::Init() {
 }
 
 void Hooking::Shutdown() {
-    // Restore VMTs first
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
     g_ParamHook.Restore();
-
     MH_DisableHook(MH_ALL_HOOKS);
     MH_Uninitialize();
 }
 
 void Hooking::AttachPlayerHooks() { AttachPlayerHooks_Logic(); }
 SDK::APalPlayerCharacter* Hooking::GetLocalPlayerSafe() { return Internal_GetLocalPlayer(); }
-// [FIX] Removed ProbeVTable to fix error E0135
