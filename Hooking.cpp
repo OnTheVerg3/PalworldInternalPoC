@@ -52,7 +52,7 @@ ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 HWND g_window = nullptr;
 
-// Default false so main menu is clickable
+// Default false (Main Menu clickable)
 bool g_ShowMenu = false;
 
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
@@ -78,7 +78,7 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject and IsGarbagePtr are in Hooking.h (inline)
+// NOTE: IsValidObject is in Hooking.h (inline)
 
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
@@ -156,21 +156,30 @@ void PerformWorldExit() {
 
 // --- AUTO-DETACH HELPER ---
 bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
-    // [FIX] Expanded Trigger List
-    // 1. "ReceiveEndPlay" - Blueprint version of EndPlay
-    // 2. "ReceiveDestroyed" - Blueprint version of Destroyed
-    // 3. "ClientReturnToMainMenu" - PlayerController exit command
-    // 4. "ClientTravel" - Level transition command
+    // [DEBUG] SPY LOGGER: This will print potential exit functions to your console.
+    // Use this to find the EXACT name Palworld uses for "Return to Title".
+    if (pObject == g_pLocal || pObject == g_pController) {
+        if (RawStrContains(name, "Travel") ||
+            RawStrContains(name, "Return") ||
+            RawStrContains(name, "Title") ||
+            RawStrContains(name, "Close") ||
+            RawStrContains(name, "Exit") ||
+            RawStrContains(name, "Destroy") ||
+            RawStrContains(name, "EndPlay"))
+        {
+            std::cout << "[SPY] Potential Exit Trigger: " << name << " (Obj: " << pObject->GetName() << ")" << std::endl;
+        }
+    }
+
+    // Known triggers - Add the ones you find in the console here!
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
         RawStrContains(name, "ClientReturnToMainMenu") ||
         RawStrContains(name, "ClientTravel")) {
 
-        // If it's the Player OR Controller triggering this, we bail.
         if (pObject == g_pLocal || pObject == g_pController) {
-            std::cout << "[Jarvis] World Exit/Travel Detected. Detaching Hooks..." << std::endl;
+            std::cout << "[Jarvis] World Exit Confirmed via: " << name << ". Detaching..." << std::endl;
 
-            // Disable hooks
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
                 for (void* pHook : g_ActiveHooks) {
@@ -189,7 +198,6 @@ bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
-
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
@@ -217,7 +225,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
-// --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
@@ -226,11 +233,7 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     }
 
     if (Features::bInfiniteDurability) {
-        if (RawStrContains(name, "UpdateDurability") ||
-            RawStrContains(name, "Deterioration") ||
-            RawStrContains(name, "Broken")) {
-            return true;
-        }
+        if (RawStrContains(name, "UpdateDurability") || RawStrContains(name, "Deterioration") || RawStrContains(name, "Broken")) return true;
     }
 
     if (Features::bInfiniteAmmo) {
@@ -250,53 +253,60 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 
 // --- THE HOOK CALLBACK ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
-    if (g_GameBase == 0) InitModuleBounds();
-
-    // 1. GARBAGE FILTER [ABSOLUTE PRIORITY]
-    // Drops 0xFF, NULL, and unaligned pointers instantly.
-    // This PREVENTS the crash reading 0xffffffffffffffff.
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
-        return;
-    }
-
-    // 2. UNSAFE MODE BYPASS (Soft Detach)
-    // If exit was detected, we pass EVERYTHING to the engine to allow cleanup.
-    if (!g_bIsSafe) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 3. WHITELIST OPTIMIZATION
-    // Only process our objects.
-    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 4. VTABLE & MODULE CHECK
-    // Ensure object is valid code execution target.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
-    }
-
-    // 5. GET NAME & CHECK FOR EXIT
-    char name[256];
-    GetNameSafe(pFunction, name, sizeof(name));
-    if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
-
-    // [FIX] Enhanced Trigger Detection
-    if (CheckAndPerformAutoDetach(pObject, name)) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 6. CHEAT LOGIC
-    bool bBlock = false;
+    // [CRITICAL SAFETY]
+    // The engine calls this thousands of times per second.
+    // If ANY of our checks access bad memory (like reading a 0xFF pointer), we crash.
+    // We wrap EVERYTHING in a try/except block. If we fail, we pass to engine.
     __try {
-        bBlock = ProcessEvent_Logic(pObject, pFunction, name);
+        if (g_GameBase == 0) InitModuleBounds();
+
+        // 1. GARBAGE FILTER (Fastest)
+        if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
+            return; // Don't even pass to engine if it's pure garbage
+        }
+
+        // 2. UNSAFE MODE BYPASS (Fast Detach)
+        // If we detected an exit, we stop touching EVERYTHING immediately.
+        if (!g_bIsSafe) {
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+
+        // 3. VTABLE VALIDATION (Crash Prevention)
+        // Ensure the object has a valid VTable pointer before we try to GetName.
+        // Reading *pObject on a freed pointer causes the 0xFF crash.
+        // We use IsBadReadPtr as a cheap pre-check.
+        if (IsBadReadPtr(pObject, 8) || IsBadReadPtr(*(void**)pObject, 8)) {
+            // It's dangerous. Pass to engine, maybe it knows how to handle it.
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+
+        // 4. WHITELIST OPTIMIZATION
+        // Only process specific objects.
+        if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+
+        // 5. GET NAME & CHECK EXIT
+        char name[256];
+        GetNameSafe(pFunction, name, sizeof(name));
+        if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
+
+        // Check if this function signals the end of the world
+        if (CheckAndPerformAutoDetach(pObject, name)) {
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+
+        // 6. CHEAT LOGIC
+        if (ProcessEvent_Logic(pObject, pFunction, name)) {
+            return; // Block execution
+        }
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        bBlock = false;
+        // If we crashed inside our logic (e.g. reading a dying object),
+        // Swallow the crash and pass execution to the engine.
+        // This is the ultimate fallback against the 0xFF crash.
+        return oProcessEvent(pObject, pFunction, pParams);
     }
-
-    if (bBlock) return;
 
     return oProcessEvent(pObject, pFunction, pParams);
 }
@@ -406,7 +416,6 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
-    // Reset caches if player changed (New World Load)
     if (pLocal != g_LastLocalPlayer) {
         if (g_LastLocalPlayer != nullptr) {
             Features::Reset();
@@ -528,6 +537,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 bHasAutoOpened = false;
                 ImGui::GetIO().MouseDrawCursor = false;
 
+                // Simple "Jarvis" Text Overlay
                 if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
                     ImGui::SetNextWindowPos(ImVec2(10, 10));
                     ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
