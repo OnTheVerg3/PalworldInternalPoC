@@ -133,7 +133,7 @@ bool IsValidSignature(uintptr_t addr) {
 }
 
 // --- CLEANUP HELPER ---
-// [FIX] NoInline to prevent SEH conflict (C2712)
+// [FIX] NoInline to prevent SEH conflict
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
@@ -142,24 +142,26 @@ __declspec(noinline) void PerformWorldExit() {
     g_pController = nullptr;
     g_pParam = nullptr;
 
-    // [FIX] Manual lock instead of lock_guard to avoid destructor unwinding logic
+    // [FIX] Lock extended to cover Reset calls to prevent Race Condition with Render Thread
     g_HookMutex.lock();
+
     g_ActiveHooks.clear();
     g_HookedObjects.clear();
     g_bPawnHooked = false;
     g_bControllerHooked = false;
     g_bParamHooked = false;
     g_LastLocalPlayer = nullptr;
-    g_HookMutex.unlock();
 
+    // Resets MUST happen inside lock so Update() doesn't read clearing vectors
     Features::Reset();
     Player::Reset();
     Menu::Reset();
 
+    g_HookMutex.unlock();
+
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    // cout is safe here because function is noinline
     std::cout << "[Jarvis] World Exit Cleanup Complete. Entering Cooldown." << std::endl;
 }
 
@@ -245,13 +247,8 @@ __declspec(noinline) bool HasValidVTable(void* pObject) {
         if (!pObject) return false;
         void* vtable = *(void**)pObject;
 
-        // Garbage Filter
         if (IsGarbagePtr(vtable)) return false;
-
-        // 256MB Threshold
         if ((uintptr_t)vtable < 0x10000000) return false;
-
-        // Alignment Filter
         if ((uintptr_t)vtable % 8 != 0) return false;
 
         return true;
