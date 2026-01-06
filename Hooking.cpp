@@ -132,21 +132,18 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    // [FIX] No console logging to avoid IO deadlocks
-    // [FIX] No MinHook calls to avoid thread suspension deadlocks
-
-    // 1. Cut the line immediately
+    // 1. Cut Logic
     g_bIsSafe = false;
 
-    // 2. Clear pointers
+    // 2. Clear Pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
 
+    // 3. Reset Hook State (Hooks remain active in memory)
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
         g_HookedObjects.clear();
-        // Reset latches so we hook again in the next world
         g_bPawnHooked = false;
         g_bControllerHooked = false;
         g_bParamHooked = false;
@@ -194,13 +191,12 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     // [CRITICAL] DETECT SELF-DESTRUCTION
     if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
         if (pObject == g_pLocal) {
-            // Cut the line so future calls fail the White-List
             g_pLocal = nullptr;
             g_pController = nullptr;
             g_pParam = nullptr;
             g_bIsSafe = false;
         }
-        return false; // Proceed to Original Function (let it destroy)
+        return false; // Allow destruction
     }
 
     if (!Hooking::bFoundValidTraffic) {
@@ -234,34 +230,35 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 
 // --- THE HOOK CALLBACK ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
-    // 1. UNSAFE MODE (Transition / Menu) [PRIORITY 1]
-    // If g_bIsSafe is false (Shutdown), we pass everything to the engine IMMEDIATELY.
-    // We do NOT check pointers. The engine handles its own sentinels (-1).
-    // We do NOT use __try (Deadlock risk).
-    if (!g_bIsSafe) {
+    if (g_GameBase == 0) InitModuleBounds();
+
+    // 1. STRICT VALIDATION (Safe Mode)
+    // If we think we are safe, we validate everything.
+    // Invalid objects (Garbage, Zombies, Sentinels) are DROPPED.
+    // This prevents the 0x3d... (Zombie) and 0xFF... (Sentinel) crashes during gameplay.
+    if (g_bIsSafe) {
+        if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+            return;
+        }
+    }
+
+    // 2. UNSAFE MODE (Transition / Menu)
+    // If not safe, or World is null, we PASS EVERYTHING.
+    // We trust the engine to handle its own shutdown garbage.
+    bool bWorldValid = false;
+    __try { if (SDK::pGWorld && *SDK::pGWorld) bWorldValid = true; }
+    __except (1) { bWorldValid = false; }
+
+    if (!g_bIsSafe || !bWorldValid) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 2. WORLD VALIDITY
-    // Cheap check. If world is null, we are unsafe.
-    if (!SDK::pGWorld || !*SDK::pGWorld) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 3. STRICT VALIDATION [PRIORITY 2]
-    // Now we are in "Safe Mode". Pointers must be valid and readable.
-    // If bad, we DROP them.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
-    }
-
-    // 4. WHITE-LIST FILTER
-    // Only process our cached objects.
+    // 3. WHITE-LIST FILTER
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 5. SAFE MODE LOGIC
+    // 4. SAFE MODE LOGIC
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
 
@@ -286,7 +283,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
     if (!IsValidObject(pObject)) return false;
     void** vtable = *reinterpret_cast<void***>(pObject);
-    if (!IsValidObject((SDK::UObject*)vtable)) return false;
+    // IsValidObject checked vtable
     void* pTarget = vtable[index];
     if (IsGarbagePtr(pTarget)) return false;
 
@@ -365,7 +362,7 @@ SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
         if (!IsValidObject(pPC)) return nullptr;
 
         SDK::APawn* pPawn = pPC->Pawn;
-        if (IsGarbagePtr(pPawn)) return nullptr;
+        // Strict Check for Pawn
         if (!IsValidObject(pPawn)) return nullptr;
 
         char nameBuf[256];

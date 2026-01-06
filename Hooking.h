@@ -3,7 +3,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <vector>
-#include <cstdint> // Required for uintptr_t
+#include <cstdint>
 #include "SDKGlobal.h"
 
 // --- GLOBAL BOUNDS (Defined in Hooking.cpp) ---
@@ -26,42 +26,31 @@ inline bool IsGarbagePtr(void* ptr) {
     return false;
 }
 
-inline bool IsValidPtr(void* ptr) {
-    if (IsGarbagePtr(ptr)) return false;
-    return !IsBadReadPtr(ptr, 8);
-}
-
-// [CRITICAL UPDATE] Safe Validation without IsBadReadPtr
-// Uses SEH (__try/__except) to safely check pointers.
+// [CRITICAL] Module-Bound Validation
 inline bool IsValidObject(SDK::UObject* pObj) {
-    // 1. Pointer Check
     if (IsGarbagePtr(pObj)) return false;
 
     __try {
-        // 2. VTable Dereference
         void** vtablePtr = reinterpret_cast<void**>(pObj);
         void* vtable = *vtablePtr;
 
-        // 3. VTable Garbage Check
         if (IsGarbagePtr(vtable)) return false;
 
-        // 4. MODULE BOUNDS CHECK
-        // Valid VTables MUST be in the Game Module (.rdata).
+        // VTables must be in the module (prevents 0x3d... Heap crash)
         if (g_GameBase != 0 && g_GameSize != 0) {
             uintptr_t vtAddr = (uintptr_t)vtable;
             if (vtAddr < g_GameBase || vtAddr >(g_GameBase + g_GameSize)) {
-                return false; // Zombie/Heap Object -> Drop
+                return false;
             }
         }
     }
     __except (1) {
-        return false; // Crashed reading VTable -> Invalid
+        return false;
     }
 
     return true;
 }
 
-// Heavy functions remain in .cpp
 void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size);
 
 class Hooking
