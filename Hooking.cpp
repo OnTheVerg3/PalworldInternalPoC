@@ -235,7 +235,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     }
 
     // 2. UNSAFE MODE (Pass-Through)
-    // If shutting down/loading, pass blindly to engine. No validation logic.
+    // If not safe, just pass to engine. Don't touch.
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
@@ -498,8 +498,8 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 else {
                     __try {
                         // Attempt to draw menu in Main Menu/Loading
-                        // If GObjects is invalid (0x8 crash), we catch it here.
-                        if (SDK::UObject::GObjects && !IsGarbagePtr(SDK::UObject::GObjects)) {
+                        // [FIX] Cast address to void** to get pointer value for validation
+                        if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
                             Menu::Draw();
                         }
                     }
