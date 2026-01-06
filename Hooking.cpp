@@ -76,44 +76,9 @@ void InitModuleBounds() {
     }
 }
 
-bool IsSentinel(void* ptr) {
-    return (uintptr_t)ptr == 0xFFFFFFFFFFFFFFFF;
-}
+// NOTE: IsValidObject, IsSentinel, etc. moved to Hooking.h (inline)
 
-bool IsGarbagePtr(void* ptr) {
-    uintptr_t addr = (uintptr_t)ptr;
-    if (!ptr) return true;
-    if (IsSentinel(ptr)) return true;
-    if (addr < 0x10000) return true;
-    if (addr > 0x7FFFFFFFFFFF) return true;
-    if (addr % 8 != 0) return true;
-    return false;
-}
-
-bool IsValidPtr(void* ptr) {
-    if (IsGarbagePtr(ptr)) return false;
-    return !IsBadReadPtr(ptr, 8);
-}
-
-// [CRITICAL] Enhanced Validation using IsBadReadPtr
-bool FastValidateObject(SDK::UObject* pObject) {
-    if (!pObject) return false;
-
-    // Check if the memory is actually readable by the OS
-    // This catches "Zombie" pointers (0xFF...) that cause AVs
-    if (IsBadReadPtr(pObject, 8)) return false;
-
-    // VTable Check
-    __try {
-        void* vtable = *(void**)pObject;
-        if (IsGarbagePtr(vtable)) return false;
-        if (IsBadReadPtr(vtable, 8)) return false;
-    }
-    __except (1) { return false; }
-
-    return true;
-}
-
+// --- SAFE STRING HANDLING ---
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -126,7 +91,7 @@ void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
 
 void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     memset(outBuf, 0, size);
-    if (!IsValidPtr(pObject)) return;
+    if (!IsValidObject(pObject)) return; // Uses inline header check
     __try {
         GetNameInternal(pObject, outBuf, size);
     }
@@ -135,6 +100,7 @@ void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     }
 }
 
+// --- UTILS ---
 bool RawStrContains(const char* haystack, const char* needle) {
     if (!haystack || !needle) return false;
     size_t hLen = strlen(haystack);
@@ -262,14 +228,14 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. FAST VALIDATION [FIRST LINE OF DEFENSE]
-    if (!FastValidateObject(pObject) || !FastValidateObject(pFunction)) {
+    // 1. STRICT VALIDATION [PRIORITY]
+    // Validates memory is readable. Prevents 0xFF Sentinel Crash.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
-    // 2. UNSAFE MODE CHECK [FIXED 0x8 CRASH]
-    // Replaced GetWorld() function call with direct pointer checks.
-    // Calling GetWorld() when pGWorld is null causes 0x0->0x8 access violation.
+    // 2. UNSAFE MODE (Transition / Menu) [FIX]
+    // Replaced GetWorld() call with direct pointer checks to prevent 0x8 crash.
     bool bWorldValid = false;
     __try {
         if (SDK::pGWorld && *SDK::pGWorld) {
@@ -291,7 +257,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return;
     }
 
-    // 4. SAFE MODE
+    // 4. SAFE MODE (Gameplay)
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
 
@@ -319,7 +285,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
 // --- HOOKING HELPERS ---
 bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
-    if (!IsValidPtr(pObject)) return false;
+    if (!IsValidObject(pObject)) return false;
     void** vtable = *reinterpret_cast<void***>(pObject);
     if (!IsValidPtr(vtable)) return false;
     void* pTarget = vtable[index];
@@ -369,7 +335,7 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
 }
 
 bool ScanAndHook(SDK::UObject* pObject, int startIdx, int endIdx, const char* debugName) {
-    if (!IsValidPtr(pObject)) return false;
+    if (!IsValidObject(pObject)) return false;
     void** vtable = *reinterpret_cast<void***>(pObject);
     if (!IsValidPtr(vtable)) return false;
     int foundIndex = -1;
@@ -381,9 +347,9 @@ bool ScanAndHook(SDK::UObject* pObject, int startIdx, int endIdx, const char* de
     return false;
 }
 
+// --- ROBUST PLAYER RETRIEVAL ---
 SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
     __try {
-        // [FIX] Use safe pointer check instead of GetWorld() call
         if (!SDK::pGWorld || !*SDK::pGWorld) return nullptr;
 
         SDK::UWorld* pWorld = *SDK::pGWorld;
@@ -401,6 +367,7 @@ SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
         if (!IsValidPtr(pPC)) return nullptr;
 
         SDK::APawn* pPawn = pPC->Pawn;
+        // Strict Garbage check for Pawn
         if (IsGarbagePtr(pPawn)) return nullptr;
         if (!IsValidPtr(pPawn)) return nullptr;
 
@@ -450,6 +417,7 @@ void AttachPlayerHooks_Logic() {
     }
 }
 
+// --- SAFE FRAME LOGIC ---
 void Present_Logic() {
     ULONGLONG CurrentTime = GetTickCount64();
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
