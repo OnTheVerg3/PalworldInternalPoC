@@ -76,7 +76,7 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject and IsGarbagePtr moved to Hooking.h for inline optimization
+// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
 
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
@@ -229,13 +229,15 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. GARBAGE FILTER
+    // 1. GARBAGE FILTER (Top Priority)
+    // Filters Sentinels (0xFF) and NULLs. Prevents 0xFF crashes.
     if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
         return;
     }
 
     // 2. UNSAFE MODE (Pass-Through)
-    // If not safe, just pass to engine. Don't touch.
+    // If shutting down/loading, pass blindly to engine. No heavy validation.
+    // This allows the engine to handle its own cleanup (even if it looks like garbage to us).
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
@@ -245,7 +247,8 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. STRICT VALIDATION
+    // 4. STRICT VALIDATION (Safe Mode Only)
+    // In-game, we reject Zombies (Heap VTables) to prevent 0x3d... crashes.
     if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
@@ -489,23 +492,18 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (g_ShowMenu) {
                 ImGui::GetIO().MouseDrawCursor = true;
 
-                // [FIX] MENU VISIBILITY LOGIC
-                // Allows menu in Safe Mode (In-Game) OR Main Menu (Unsafe but not crashing).
-                // Wraps in exception handler to catch transient crashes during level load.
+                // [CRITICAL FIX] STRICT MENU SAFETY
+                // Menu is ONLY allowed when Player is valid and game is stable.
+                // This prevents 0x8 Crash (Reading dead GObjects).
                 if (g_bIsSafe) {
                     Menu::Draw();
                 }
                 else {
-                    __try {
-                        // Attempt to draw menu in Main Menu/Loading
-                        // [FIX] Cast address to void** to get pointer value for validation
-                        if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
-                            Menu::Draw();
-                        }
-                    }
-                    __except (EXCEPTION_EXECUTE_HANDLER) {
-                        // Menu crashed (Level Transition). Skip frame.
-                    }
+                    // Optional: Show "Waiting..." overlay
+                    ImGui::SetNextWindowPos(ImVec2(10, 10));
+                    ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
+                    ImGui::TextColored(ImVec4(1, 1, 0, 1), "[!] Waiting for Gameplay...");
+                    ImGui::End();
                 }
             }
             else {

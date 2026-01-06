@@ -20,13 +20,19 @@ inline bool IsGarbagePtr(void* ptr) {
     uintptr_t addr = (uintptr_t)ptr;
     if (!ptr) return true;
     if (IsSentinel(ptr)) return true;
-    if (addr < 0x10000) return true;
+    if (addr < 0x10000) return true; // 64KB null partition
     if (addr > 0x7FFFFFFFFFFF) return true;
     if (addr % 8 != 0) return true;
     return false;
 }
 
+inline bool IsValidPtr(void* ptr) {
+    if (IsGarbagePtr(ptr)) return false;
+    return !IsBadReadPtr(ptr, 8);
+}
+
 // [CRITICAL] Module-Bound Validation
+// Defined inline to fix LNK2001 and ensure availability in all modules
 inline bool IsValidObject(SDK::UObject* pObj) {
     if (IsGarbagePtr(pObj)) return false;
 

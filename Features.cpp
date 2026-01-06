@@ -75,7 +75,7 @@ namespace Features {
             if (pWeapon->ownWeaponStaticData && !IsBadReadPtr(pWeapon->ownWeaponStaticData, 8)) {
 
                 if (g_LastWeapon != pWeapon) {
-                    // [CRITICAL FIX] Use IsBadReadPtr directly to resolve C3861 build error
+                    // [FIX] Using IsBadReadPtr instead of IsValidPtr to fix C3861
                     if (g_LastWeapon && !IsBadReadPtr(g_LastWeapon, 8) && g_LastWeapon->ownWeaponStaticData && g_OriginalStats.bSaved) {
                         g_LastWeapon->ownWeaponStaticData->AttackValue = g_OriginalStats.Attack;
                     }
