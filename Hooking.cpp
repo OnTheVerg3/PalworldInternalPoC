@@ -132,7 +132,7 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    g_bIsSafe = false;
+    g_bIsSafe = false; // CUT LINE IMMEDIATELY
 
     g_pLocal = nullptr;
     g_pController = nullptr;
@@ -184,6 +184,17 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
 // --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
+    // Critical Self-Destruction Check
+    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
+        if (pObject == g_pLocal) {
+            g_pLocal = nullptr;
+            g_pController = nullptr;
+            g_pParam = nullptr;
+            g_bIsSafe = false;
+        }
+        return false;
+    }
+
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
             Hooking::bFoundValidTraffic = true;
@@ -217,43 +228,41 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. GARBAGE FILTER (Always Active)
-    // Filters Sentinels (0xFF) and NULLs. Prevents 0xFF crashes.
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
+    // 1. STRICT VALIDATION [TOP PRIORITY]
+    // We verify the object's VTable is within the game module.
+    // This catches Zombies (0x54e661) and Garbage (0xFF...) immediately.
+    // If it fails, we DROP it. No excuses.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return;
+    }
 
-    // 2. GET FUNCTION NAME
-    char name[256];
-    GetNameSafe(pFunction, name, sizeof(name));
-    if (name[0] == '\0') return;
-
-    // 3. DESTRUCTION PASS-THROUGH (Prevent Freeze)
-    // If the object is valid but being destroyed, let the engine handle it.
-    bool bIsDestruction = RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay");
-
-    if (bIsDestruction) {
-        if (pObject == g_pLocal) {
-            g_pLocal = nullptr;
-            g_pController = nullptr;
-            g_pParam = nullptr;
-            g_bIsSafe = false;
-        }
+    // 2. UNSAFE MODE (Pass-Through)
+    // If the object is valid, but we are shutting down (!g_bIsSafe), we PASS it.
+    // This prevents the Freeze by allowing the engine to destroy its valid objects.
+    if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. UNSAFE MODE FILTER (Prevent Random Gameplay Crashes)
-    // If we are shutting down (and it's not a destruction event), drop it.
-    if (!g_bIsSafe) return;
+    // 3. WORLD VALIDITY CHECKS
+    if (!SDK::pGWorld || !*SDK::pGWorld) {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
 
-    // 5. STRICT VALIDATION (Safe Mode)
-    // We are in-game. Ensure objects are strictly valid (No Zombies).
-    if (!IsValidObject(pObject)) return;
-
-    // 6. WHITE-LIST FILTER
+    // 4. WHITE-LIST FILTER
+    // Optimization: Only hook what we need.
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 7. CHEAT LOGIC
+    // 5. SAFE MODE LOGIC
+    // We are in-game and the object is ours. Run features.
+    char name[256];
+    GetNameSafe(pFunction, name, sizeof(name));
+
+    if (name[0] == '\0') {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
     bool bBlock = false;
     __try {
         bBlock = ProcessEvent_Logic(pObject, pFunction, name);
@@ -350,6 +359,7 @@ SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
         if (!IsValidObject(pPC)) return nullptr;
 
         SDK::APawn* pPawn = pPC->Pawn;
+        // Strict Check for Pawn
         if (!IsValidObject(pPawn)) return nullptr;
 
         char nameBuf[256];
@@ -399,54 +409,45 @@ void AttachPlayerHooks_Logic() {
 }
 
 void Present_Logic() {
-    __try {
-        ULONGLONG CurrentTime = GetTickCount64();
+    ULONGLONG CurrentTime = GetTickCount64();
+    SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
 
-        // 1. Get Player Safely
-        SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
-
-        // 2. Validate Player. If invalid, unsafe.
-        if (!pLocal || !IsValidObject(pLocal)) {
-            g_bIsSafe = false;
-
-            // Cleanup Logic
-            g_pLocal = nullptr;
-            g_pController = nullptr;
-            g_pParam = nullptr;
-
-            if (g_TimePlayerLost == 0) g_TimePlayerLost = CurrentTime;
-
-            if ((CurrentTime - g_TimePlayerLost) > 1000) {
-                if (g_LastLocalPlayer != nullptr) {
-                    PerformWorldExit();
-                    g_TimePlayerDetected = 0;
-                }
-            }
-            return;
-        }
-
-        g_TimePlayerLost = 0;
-
-        if (g_TimePlayerDetected == 0) {
-            g_TimePlayerDetected = CurrentTime;
-            std::cout << "[System] Player detected. Stabilizing..." << std::endl;
-        }
-        if ((CurrentTime - g_TimePlayerDetected) < 3000) {
-            g_bIsSafe = false;
-            return;
-        }
-
-        // 3. Game is Stable.
-        g_bIsSafe = true;
-        AttachPlayerHooks_Logic();
-
-        Features::RunLoop();
-        Player::Update(pLocal);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Fallback catch
+    if (!pLocal) {
         g_bIsSafe = false;
+
+        g_pLocal = nullptr;
+        g_pController = nullptr;
+        g_pParam = nullptr;
+
+        if (g_TimePlayerLost == 0) g_TimePlayerLost = CurrentTime;
+
+        if ((CurrentTime - g_TimePlayerLost) > 1000) {
+            if (g_LastLocalPlayer != nullptr) {
+                PerformWorldExit();
+                g_TimePlayerDetected = 0;
+            }
+        }
+        return;
     }
+
+    g_TimePlayerLost = 0;
+
+    if (g_TimePlayerDetected == 0) {
+        g_TimePlayerDetected = CurrentTime;
+        std::cout << "[System] Player detected. Stabilizing..." << std::endl;
+    }
+    if ((CurrentTime - g_TimePlayerDetected) < 3000) {
+        g_bIsSafe = false;
+        return;
+    }
+
+    g_bIsSafe = true;
+    AttachPlayerHooks_Logic();
+
+    __try { Features::RunLoop(); }
+    __except (1) {}
+    __try { Player::Update(pLocal); }
+    __except (1) {}
 }
 
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
@@ -476,8 +477,8 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
-    // Logic Loop (Wrapped)
-    Present_Logic();
+    __try { Present_Logic(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {}
 
     __try {
         if (g_mainRenderTargetView) {
@@ -488,6 +489,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (g_ShowMenu) {
                 ImGui::GetIO().MouseDrawCursor = true;
 
+                // [FIX] MENU SAFETY
                 if (g_bIsSafe) {
                     Menu::Draw();
                 }

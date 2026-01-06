@@ -42,7 +42,7 @@ namespace Features {
         auto it = g_FuncCache.find(name);
         if (it != g_FuncCache.end()) return it->second;
 
-        // [SAFETY] Strict check
+        // [SAFETY] Double check globals
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return nullptr;
 
         SDK::UFunction* fn = SDK::UObject::FindObject<SDK::UFunction>(name);
@@ -112,14 +112,10 @@ namespace Features {
     }
 
     void RunLoop() {
-        // [CRITICAL] Exception Barrier
-        // Catches 0xFF / 0x8 crashes if engine destroys objects mid-logic
         __try {
             RunLoop_Logic();
         }
-        __except (1) {
-            // Logic crashed (likely world exit).
-            // Reset state safely.
+        __except (EXCEPTION_EXECUTE_HANDLER) {
             g_LastWeapon = nullptr;
         }
     }
