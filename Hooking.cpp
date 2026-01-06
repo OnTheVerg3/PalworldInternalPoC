@@ -13,7 +13,6 @@
 #include <atomic>
 #include <mutex> 
 #include <psapi.h> 
-#include <thread> // Required for async unhooking
 
 #pragma comment(lib, "psapi.lib")
 
@@ -81,7 +80,7 @@ void InitModuleBounds() {
     }
 }
 
-// NoInline to avoid C2712
+// NoInline to avoid C2712 (std::string destructor vs __try)
 __declspec(noinline) void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -135,7 +134,7 @@ bool IsValidSignature(uintptr_t addr) {
 }
 
 // --- CLEANUP HELPER ---
-// [FIX] NoInline + Manual Lock
+// NoInline + Manual Lock
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
@@ -146,8 +145,6 @@ __declspec(noinline) void PerformWorldExit() {
 
     g_HookMutex.lock();
 
-    // We clear the active hooks list, but we DO NOT disable them here synchronously.
-    // The Async thread handles the physical detach.
     g_ActiveHooks.clear();
     g_HookedObjects.clear();
     g_bPawnHooked = false;
@@ -164,17 +161,9 @@ __declspec(noinline) void PerformWorldExit() {
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    std::cout << "[Jarvis] World Exit Logic Reset. Async Detach Scheduled." << std::endl;
-
-    // [CRITICAL FIX] ASYNC UNHOOKING
-    // Spawn a thread to disable hooks after a short delay.
-    // This allows the current hook execution to finish safely (avoiding deadlock)
-    // and removes the hook entirely (avoiding crashes on zombie objects).
-    std::thread([]() {
-        Sleep(100); // Wait for current frame/hook to finish
-        MH_DisableHook(MH_ALL_HOOKS);
-        std::cout << "[Jarvis] Hooks physically disabled for safety." << std::endl;
-        }).detach();
+    // [FIX] Removed Async Detach to prevent Freeze.
+    // We now rely on the Selective Filter in hkProcessEvent.
+    std::cout << "[Jarvis] World Exit Cleanup Complete. Entering Cooldown." << std::endl;
 }
 
 // --- AUTO-DETACH HELPER ---
@@ -185,7 +174,7 @@ __declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const
         RawStrContains(name, "ClientTravel"))
     {
         if (pObject == g_pLocal || pObject == g_pController) {
-            std::cout << "[Jarvis] Exit Trigger: " << name << ". Soft Detach." << std::endl;
+            std::cout << "[Jarvis] Exit Trigger: " << name << ". Engaging Selective Filter." << std::endl;
             PerformWorldExit();
             return true;
         }
@@ -276,32 +265,43 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
         // 2. VTABLE SANITY
         if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
+            return; // Drop Zombie
+        }
+
+        // 3. GET NAME & CHECK FOR EXIT
+        char name[256];
+        GetNameSafe(pFunction, name, sizeof(name));
+
+        // [FIX] If name is unreadable, DROP IT. Do not pass to engine.
+        if (name[0] == '\0') return;
+
+        // If Exit Trigger detected, set Unsafe Mode
+        if (CheckAndPerformAutoDetach(pObject, name)) {
+            // Pass the exit signal safely
+            __try { return oProcessEvent(pObject, pFunction, pParams); }
+            __except (1) { return; }
+        }
+
+        // 4. UNSAFE MODE "SELECTIVE PASS" [CRITICAL FIX]
+        // If we are shutting down (Unsafe Mode), we ONLY pass cleanup functions.
+        // We BLOCK all logic/update functions to prevent the 0x38 crash.
+        if (!g_bIsSafe) {
+            if (RawStrContains(name, "ReceiveDestroyed") ||
+                RawStrContains(name, "ReceiveEndPlay") ||
+                RawStrContains(name, "Close") ||
+                RawStrContains(name, "Exit") ||
+                RawStrContains(name, "Shutdown") ||
+                RawStrContains(name, "Travel"))
+            {
+                __try { return oProcessEvent(pObject, pFunction, pParams); }
+                __except (1) { return; }
+            }
+            // Block everything else (Ticks, Updates, etc.)
             return;
         }
 
-        // 3. UNSAFE MODE "BLIND PASS"
-        // If unsafe, we pass execution immediately. 
-        // NOTE: The Async Unhook thread will soon disable this hook entirely.
-        if (!g_bIsSafe) {
-            __try { return oProcessEvent(pObject, pFunction, pParams); }
-            __except (1) { return; }
-        }
-
-        // 4. WHITELIST OPTIMIZATION
+        // 5. WHITELIST OPTIMIZATION (Safe Mode)
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
-            __try { return oProcessEvent(pObject, pFunction, pParams); }
-            __except (1) { return; }
-        }
-
-        // 5. GET NAME & CHECK FOR EXIT
-        char name[256];
-        GetNameSafe(pFunction, name, sizeof(name));
-        if (name[0] == '\0') {
-            __try { return oProcessEvent(pObject, pFunction, pParams); }
-            __except (1) { return; }
-        }
-
-        if (CheckAndPerformAutoDetach(pObject, name)) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
         }
@@ -338,7 +338,6 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
 
     if (!bAlreadyTracked) {
         MH_STATUS status = MH_CreateHook(pTarget, &hkProcessEvent, (void**)&oProcessEvent);
-        // If hook already created (from prev session), we just enable it
         if (status == MH_OK || status == MH_ERROR_ALREADY_CREATED) {
             MH_EnableHook(pTarget);
             {
@@ -352,7 +351,6 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
         }
     }
     else {
-        // [FIX] Ensure we re-enable if tracked but disabled
         MH_EnableHook(pTarget);
     }
 
@@ -539,6 +537,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
+            // Lock UI to prevent Race Condition
             g_HookMutex.lock();
 
             if (g_bIsSafe) {
