@@ -30,7 +30,7 @@ SDK::UObject* g_pParam = nullptr;
 // Time-Based Latches
 ULONGLONG g_TimePlayerDetected = 0;
 ULONGLONG g_TimePlayerLost = 0;
-ULONGLONG g_ExitCooldown = 0; // Cooldown to prevent re-hooking during shutdown
+ULONGLONG g_ExitCooldown = 0;
 
 std::atomic<bool> g_bIsSafe(false);
 
@@ -134,20 +134,15 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    // 1. Force Unsafe Mode
     g_bIsSafe = false;
-
-    // 2. Set Cooldown (Block logic for 3 seconds to clear old memory)
     g_ExitCooldown = GetTickCount64() + 3000;
 
-    // 3. Clear Pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
-        // Clear tracking to force re-evaluation on next join
         g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
@@ -156,16 +151,14 @@ void PerformWorldExit() {
         g_LastLocalPlayer = nullptr;
     }
 
-    // 4. Reset ALL Subsystems
     Features::Reset();
     Player::Reset();
     Menu::Reset();
 
-    // 5. Reset UI State
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    std::cout << "[Jarvis] World Exit Cleanup Complete. Cooldown Active." << std::endl;
+    std::cout << "[Jarvis] World Exit Cleanup Complete. Entering Cooldown." << std::endl;
 }
 
 // --- AUTO-DETACH HELPER ---
@@ -242,13 +235,21 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     return false;
 }
 
-// Helper: Lightweight VTable Check (Fixes 0xFF crash without freezing on DLLs)
+// [HARDENED] Strict VTable Check to filter Zombies
 bool HasValidVTable(void* pObject) {
     __try {
         if (!pObject) return false;
         void* vtable = *(void**)pObject;
+
+        // Garbage Filter
         if (IsGarbagePtr(vtable)) return false;
+
+        // Address Range Filter
         if ((uintptr_t)vtable < 0x10000) return false;
+
+        // Alignment Filter (Ptrs are 8-byte aligned)
+        if ((uintptr_t)vtable % 8 != 0) return false;
+
         return true;
     }
     __except (1) { return false; }
@@ -259,26 +260,29 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     if (g_GameBase == 0) InitModuleBounds();
 
     __try {
-        // 1. GARBAGE FILTER (Pointer Itself)
+        // 1. GARBAGE FILTER (Fastest)
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
         // 2. VTABLE SANITY (The "Zombie" Filter)
-        // [CRITICAL] Check BOTH Object and Function.
-        // If pFunction is a zombie (0xFF), passing it to oProcessEvent crashes.
+        // [CRITICAL] We drop bad objects HERE. 
+        // If we don't, the engine crashes reading -1 (0xFF...) later.
         if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
-            return; // Drop Zombie Objects
+            return; // Drop Zombie
         }
 
-        // 3. UNSAFE MODE "TRY-PASS" (Soft Detach)
-        // If exiting, we pass everything VALID to the engine.
-        // We wrap it in a try-catch so if the engine *does* crash, we catch it.
+        // 3. UNSAFE MODE "BLIND PASS" (Hands Off Approach)
+        // If we are exiting/unsafe, we pass EVERYTHING valid to the engine.
+        // We do NOT filter by string. We trust the engine to clean up valid objects.
         if (!g_bIsSafe) {
-            __try { return oProcessEvent(pObject, pFunction, pParams); }
-            __except (1) { return; }
+            __try {
+                return oProcessEvent(pObject, pFunction, pParams);
+            }
+            __except (1) {
+                return; // Swallow engine crashes during teardown
+            }
         }
 
-        // 4. WHITELIST OPTIMIZATION
-        // Only process our specific tracked objects.
+        // 4. WHITELIST OPTIMIZATION (Safe Mode Only)
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
@@ -307,7 +311,6 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        // Fallback: Drop the call if our logic crashed.
         return;
     }
 }
@@ -418,9 +421,9 @@ void AttachPlayerHooks_Logic() {
     g_pParam = pLocal->CharacterParameterComponent;
 
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] New Player Detected." << std::endl;
-        // Redundant reset for safety on new world load
+        std::cout << "[System] New Player Detected. Flushing Caches." << std::endl;
         Features::Reset();
+        Player::Reset();
         g_LastLocalPlayer = pLocal;
     }
 
@@ -442,7 +445,6 @@ void AttachPlayerHooks_Logic() {
 void Present_Logic() {
     ULONGLONG CurrentTime = GetTickCount64();
 
-    // [NEW] Cooldown Check: Don't touch memory for 3s after exit
     if (CurrentTime < g_ExitCooldown) {
         g_bIsSafe = false;
         return;
@@ -539,7 +541,6 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 }
             }
             else {
-                // Not Safe (Menu/Loading/Exit)
                 ImGui::GetIO().MouseDrawCursor = false;
 
                 if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
