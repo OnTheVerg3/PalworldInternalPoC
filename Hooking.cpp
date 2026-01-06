@@ -76,7 +76,7 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
+// NOTE: IsValidObject and IsGarbagePtr are in Hooking.h
 
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
@@ -132,15 +132,12 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    // 1. Cut Logic
-    g_bIsSafe = false;
+    g_bIsSafe = false; // CUT LINE IMMEDIATELY
 
-    // 2. Clear Pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
 
-    // 3. Reset Hook State (Hooks remain active in memory)
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
         g_HookedObjects.clear();
@@ -196,7 +193,7 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
             g_pParam = nullptr;
             g_bIsSafe = false;
         }
-        return false; // Allow destruction
+        return false;
     }
 
     if (!Hooking::bFoundValidTraffic) {
@@ -232,33 +229,38 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. STRICT VALIDATION (Safe Mode)
-    // If we think we are safe, we validate everything.
-    // Invalid objects (Garbage, Zombies, Sentinels) are DROPPED.
-    // This prevents the 0x3d... (Zombie) and 0xFF... (Sentinel) crashes during gameplay.
-    if (g_bIsSafe) {
-        if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-            return;
-        }
+    // 1. GARBAGE FILTER (Universal) [FIX]
+    // We check this BEFORE checking Safe Mode.
+    // If it's a sentinel (0xFF) or null, we DROP it. Passing it crashes the engine.
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
+        return;
     }
 
-    // 2. UNSAFE MODE (Transition / Menu)
-    // If not safe, or World is null, we PASS EVERYTHING.
-    // We trust the engine to handle its own shutdown garbage.
-    bool bWorldValid = false;
-    __try { if (SDK::pGWorld && *SDK::pGWorld) bWorldValid = true; }
-    __except (1) { bWorldValid = false; }
-
-    if (!g_bIsSafe || !bWorldValid) {
+    // 2. UNSAFE MODE (Pass-Through)
+    // If we are shutting down, pass the valid-looking pointer to the engine.
+    // We do NOT do strict validation here to avoid overhead/freezes.
+    // We do NOT use __try to avoid deadlocks.
+    if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 3. WHITE-LIST FILTER
+    // 3. WORLD VALIDITY
+    if (!SDK::pGWorld || !*SDK::pGWorld) {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
+    // 4. STRICT VALIDATION (Safe Mode Only)
+    // Now we check VTables and Bounds. If this fails, it's a Zombie -> DROP.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return;
+    }
+
+    // 5. WHITE-LIST FILTER
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. SAFE MODE LOGIC
+    // 6. SAFE MODE LOGIC
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
 
@@ -283,7 +285,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
     if (!IsValidObject(pObject)) return false;
     void** vtable = *reinterpret_cast<void***>(pObject);
-    // IsValidObject checked vtable
+    if (!IsValidObject((SDK::UObject*)vtable)) return false;
     void* pTarget = vtable[index];
     if (IsGarbagePtr(pTarget)) return false;
 
