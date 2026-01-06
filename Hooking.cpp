@@ -143,8 +143,8 @@ void PerformWorldExit() {
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
-        // We do NOT disable hooks via MinHook to avoid deadlocks.
-        // We just clear our tracking so we know to re-hook later.
+        // Do NOT disable hooks via MinHook (prevents deadlock).
+        // Clear tracking so we know to re-verify later.
         g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
@@ -177,9 +177,6 @@ bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
-
-        // Only capture mouse if In-Game. 
-        // In Main Menu, g_bIsSafe is false, so we never trap the cursor.
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
@@ -247,7 +244,7 @@ bool HasValidVTable(void* pObject) {
         // Garbage Filter: Check alignment, range, and sentinel values
         if (IsGarbagePtr(vtable)) return false;
 
-        // Low-Address Filter: Catches floats/ints treated as pointers (common in zombies)
+        // Low-Address Filter: Catches floats/ints treated as pointers
         if ((uintptr_t)vtable < 0x10000) return false;
 
         return true;
@@ -259,39 +256,32 @@ bool HasValidVTable(void* pObject) {
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // WRAP EVERYTHING IN EXCEPTION HANDLER
     __try {
-        // 1. GARBAGE FILTER [ABSOLUTE PRIORITY]
-        // Checks pointer alignment and bounds. Does NOT dereference.
+        // 1. GARBAGE FILTER (Pointer Itself)
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
-            return;
+            return; // Drop bad pointers
         }
 
-        // 2. VTABLE SANITY CHECK [FIX FOR 0xFF CRASH]
-        // We MUST verify the VTable is valid BEFORE passing to oProcessEvent.
-        // Even in "Unsafe Mode", we cannot pass a Zombie (0xFF vtable) to the engine.
-        if (!HasValidVTable(pObject)) {
+        // 2. VTABLE SANITY CHECK [CRITICAL FIX]
+        // Check BOTH Object and Function. If Function is a zombie, we crash inside.
+        if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
             return; // Drop Zombie Objects
         }
 
-        // 3. UNSAFE MODE "TRY-PASS" [FIX FOR FREEZE]
-        // Now that we know the object is physically valid (has a VTable), 
-        // if we are in Shutdown/Unsafe Mode, we PASS it. 
-        // This allows valid objects to clean up (EndPlay), preventing the freeze.
+        // 3. UNSAFE MODE "TRY-PASS" [CRITICAL FIX]
+        // If exiting, we pass everything VALID to the engine.
+        // We wrap it in a try-catch so if the engine crashes, we swallow it.
         if (!g_bIsSafe) {
             __try {
                 return oProcessEvent(pObject, pFunction, pParams);
             }
             __except (1) {
-                // If it crashes here, the engine couldn't handle it. Swallow it.
-                return;
+                return; // Swallow engine crash during exit
             }
         }
 
         // 4. WHITELIST OPTIMIZATION
-        // Only process our specific tracked objects.
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
-            // Pass safe non-player objects to engine
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
         }
@@ -321,8 +311,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
-        // [CRITICAL] If we crash anywhere above (e.g. reading a dying object's name),
-        // we DROP the call. Do NOT retry oProcessEvent.
+        // Fallback: Drop the call if our logic crashed.
         return;
     }
 }
