@@ -76,7 +76,7 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
+// NOTE: IsValidObject and IsGarbagePtr moved to Hooking.h for inline optimization
 
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
@@ -235,7 +235,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     }
 
     // 2. UNSAFE MODE (Pass-Through)
-    // If not safe, just pass to engine. Don't touch.
+    // If shutting down/loading, pass blindly to engine. No validation logic.
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
@@ -489,9 +489,23 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (g_ShowMenu) {
                 ImGui::GetIO().MouseDrawCursor = true;
 
-                // [FIX] Prevents 0x8 crash (Menu accessing dead GObjects during shutdown)
+                // [FIX] MENU VISIBILITY LOGIC
+                // Allows menu in Safe Mode (In-Game) OR Main Menu (Unsafe but not crashing).
+                // Wraps in exception handler to catch transient crashes during level load.
                 if (g_bIsSafe) {
                     Menu::Draw();
+                }
+                else {
+                    __try {
+                        // Attempt to draw menu in Main Menu/Loading
+                        // If GObjects is invalid (0x8 crash), we catch it here.
+                        if (SDK::UObject::GObjects && !IsGarbagePtr(SDK::UObject::GObjects)) {
+                            Menu::Draw();
+                        }
+                    }
+                    __except (EXCEPTION_EXECUTE_HANDLER) {
+                        // Menu crashed (Level Transition). Skip frame.
+                    }
                 }
             }
             else {
