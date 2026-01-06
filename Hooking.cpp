@@ -76,8 +76,6 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject moved to Hooking.h
-
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -184,6 +182,16 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
 // --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
+    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
+        if (pObject == g_pLocal) {
+            g_pLocal = nullptr;
+            g_pController = nullptr;
+            g_pParam = nullptr;
+            g_bIsSafe = false;
+        }
+        return false;
+    }
+
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
             Hooking::bFoundValidTraffic = true;
@@ -218,43 +226,37 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     if (g_GameBase == 0) InitModuleBounds();
 
     // 1. ZOMBIE FILTER [TOP PRIORITY]
-    // We check IsValidObject FIRST. This validates that the VTable is inside the Game Module.
-    // This catches 0xFF... (Sentinels), 0x3f... (Floats), and 0x3d... (Heap Zombies).
-    // If an object fails this, it is dead. Drop it immediately.
-    // NOTE: This prevents the 0x3d... crash.
+    // Filter out Sentinels (-1), NULLs, and Heap Zombies (invalid VTables).
+    // This stops the Crashes.
     if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
-    // 2. GET FUNCTION NAME
-    char name[256];
-    GetNameSafe(pFunction, name, sizeof(name));
-    if (name[0] == '\0') return;
-
-    // 3. DESTRUCTION PASS-THROUGH (Prevent Freeze)
-    // If the object IS Valid, and the engine wants to destroy it, let it pass.
-    bool bIsDestruction = RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay");
-
-    if (bIsDestruction) {
-        if (pObject == g_pLocal) {
-            g_pLocal = nullptr;
-            g_pController = nullptr;
-            g_pParam = nullptr;
-            g_bIsSafe = false;
-        }
+    // 2. UNSAFE MODE PASS-THROUGH [Prevents Freeze]
+    // If we are shutting down (Unsafe), and the object passed validation (it's real),
+    // we MUST let the engine process it. This clears the event queue and prevents deadlock.
+    if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. UNSAFE MODE FILTER (Prevent Random Gameplay Crashes)
-    // If not destroying, and safe mode is off, drop it.
-    if (!g_bIsSafe) return;
+    // 3. WORLD VALIDITY CHECK
+    if (!SDK::pGWorld || !*SDK::pGWorld) {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
 
-    // 5. WHITE-LIST FILTER
+    // 4. WHITE-LIST FILTER
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 6. CHEAT LOGIC
+    // 5. SAFE MODE LOGIC
+    char name[256];
+    GetNameSafe(pFunction, name, sizeof(name));
+
+    if (name[0] == '\0') {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
     bool bBlock = false;
     __try {
         bBlock = ProcessEvent_Logic(pObject, pFunction, name);
