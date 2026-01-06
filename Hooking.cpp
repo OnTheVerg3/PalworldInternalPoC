@@ -25,13 +25,11 @@ VMTHook g_ParamHook;
 std::mutex g_HookMutex;
 
 // --- FAST ACCESS CACHE ---
-// [FIX] This is the ONE TRUE DEFINITION of g_pLocal.
 SDK::APalPlayerCharacter* g_pLocal = nullptr;
 SDK::UObject* g_pController = nullptr;
 SDK::UObject* g_pParam = nullptr;
 
 // Flags
-// [FIX] Changed to std::atomic to match the extern declaration in Features.cpp
 std::atomic<bool> g_bIsSafe(false);
 
 bool g_ShowMenu = false;
@@ -39,7 +37,7 @@ bool g_bHasAutoOpened = false;
 
 // Helpers
 void* g_LastLocalPlayer = nullptr;
-ULONGLONG g_TimePlayerDetected = 0;
+ULONGLONG g_TimePlayerDetected = 0; // [RESTORED] Stabilization Timer
 ULONGLONG g_ExitCooldown = 0;
 
 // Rendering
@@ -102,6 +100,7 @@ bool RawStrContains(const char* haystack, const char* needle) {
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
+    g_TimePlayerDetected = 0; // [FIX] Reset stabilization timer so we wait on next join
 
     g_HookMutex.lock();
 
@@ -197,7 +196,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
             }
 
             if (g_bIsSafe) {
-                if (ProcessEvent_Logic(pObject, pFunction, name)) return;
+                if (ProcessEvent_Logic(pObject, pFunction, name)) return; // Block
             }
         }
 
@@ -236,8 +235,9 @@ void AttachPlayerHooks_Logic() {
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) return;
 
+    // Detect new player
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] New Player Detected. Attaching VMT Hooks." << std::endl;
+        std::cout << "[System] New Player Detected. Attaching VMT Hooks..." << std::endl;
 
         g_HookMutex.lock();
         Features::Reset();
@@ -247,6 +247,7 @@ void AttachPlayerHooks_Logic() {
         g_pController = pLocal->Controller;
         g_pParam = pLocal->CharacterParameterComponent;
 
+        // --- APPLY VMT HOOKS ---
         if (g_PawnHook.Init(pLocal)) {
             g_PawnHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
             std::cout << "[+] Pawn Hooked (VMT)" << std::endl;
@@ -268,11 +269,29 @@ void AttachPlayerHooks_Logic() {
 }
 
 void Present_Logic() {
-    if (GetTickCount64() < g_ExitCooldown) { g_bIsSafe = false; return; }
+    ULONGLONG CurrentTime = GetTickCount64();
+
+    // 1. Exit Cooldown (Shutdown Phase)
+    if (CurrentTime < g_ExitCooldown) {
+        g_bIsSafe = false;
+        return;
+    }
 
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) {
         if (g_LastLocalPlayer != nullptr) PerformWorldExit();
+        return;
+    }
+
+    // 2. Stabilization Phase (New World Load)
+    if (g_TimePlayerDetected == 0) {
+        g_TimePlayerDetected = CurrentTime;
+        std::cout << "[System] Player detected. Stabilizing (3s)..." << std::endl;
+    }
+
+    // Wait 3 seconds before hooking to avoid interrupting initialization
+    if ((CurrentTime - g_TimePlayerDetected) < 3000) {
+        g_bIsSafe = false;
         return;
     }
 
