@@ -52,7 +52,7 @@ ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 HWND g_window = nullptr;
 
-// [UPDATE] Default to false so Main Menu is clickable immediately
+// Default false so main menu is clickable
 bool g_ShowMenu = false;
 
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
@@ -142,6 +142,8 @@ void PerformWorldExit() {
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
+        // We do NOT disable hooks here. We just stop logic.
+        // Hooks remain active but in "Pass-Through" mode.
         g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
@@ -154,33 +156,10 @@ void PerformWorldExit() {
     Player::Reset();
 }
 
-// --- AUTO-DETACH HELPER (FIXES C2712) ---
-// Extracted to separate C++ object unwinding (lock_guard) from SEH (__try)
-bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
-    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
-        if (pObject == g_pLocal) {
-            std::cout << "[Jarvis] World Exit Detected. Detaching Hooks..." << std::endl;
-
-            // Disable hooks safely using RAII lock
-            {
-                std::lock_guard<std::mutex> lock(g_HookMutex);
-                for (void* pHook : g_ActiveHooks) {
-                    MH_DisableHook(pHook);
-                }
-            }
-
-            PerformWorldExit();
-            return true;
-        }
-    }
-    return false;
-}
-
 // --- INPUT HANDLER ---
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
-
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
@@ -243,27 +222,45 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction) || !IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
-    }
-
-    char name[256];
-    GetNameSafe(pFunction, name, sizeof(name));
-    if (name[0] == '\0') return;
-
-    // [FIX] Auto-Detach Logic moved to helper to avoid C2712
-    if (CheckAndPerformAutoDetach(pObject, name)) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
+    // 1. ABSOLUTE PASS-THROUGH (Unsafe Mode)
+    // If we are not safe (Shutdown/Loading), we do NOTHING.
+    // We pass the call to the engine blindly. This prevents race conditions.
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
+    // 2. VALIDATION (Safe Mode)
+    // We are in-game. Now we must validate pointers before reading.
+    // If a pointer is garbage (but we are in-game), we just pass it.
+    // We do NOT crash, we just don't touch it.
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction) || !IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
+    // 3. GET NAME
+    char name[256];
+    GetNameSafe(pFunction, name, sizeof(name));
+    if (name[0] == '\0') {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
+    // 4. EXIT DETECTION
+    // If we see the local player being destroyed, we engage the Kill Switch.
+    // Future calls will hit Step 1 and pass through instantly.
+    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
+        if (pObject == g_pLocal) {
+            std::cout << "[Jarvis] Player Destruction Detected. Disengaging Logic." << std::endl;
+            PerformWorldExit(); // Sets g_bIsSafe = false
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+    }
+
+    // 5. WHITELIST
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
+    // 6. CHEAT LOGIC
     bool bBlock = false;
     __try {
         bBlock = ProcessEvent_Logic(pObject, pFunction, name);
@@ -382,6 +379,7 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
+    // Reset caches if player changed (New World Load)
     if (pLocal != g_LastLocalPlayer) {
         if (g_LastLocalPlayer != nullptr) {
             Features::Reset();
@@ -409,7 +407,8 @@ void Present_Logic() {
     ULONGLONG CurrentTime = GetTickCount64();
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
 
-    if (!pLocal) {
+    // 1. If player is missing or invalid -> UNSAFE.
+    if (!pLocal || !IsValidObject(pLocal)) {
         g_bIsSafe = false;
 
         g_pLocal = nullptr;
@@ -438,6 +437,7 @@ void Present_Logic() {
         return;
     }
 
+    // 2. Player is Stable -> SAFE.
     g_bIsSafe = true;
     AttachPlayerHooks_Logic();
 
@@ -474,8 +474,9 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
+    // Execute Logic Check
     __try { Present_Logic(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {}
+    __except (EXCEPTION_EXECUTE_HANDLER) { g_bIsSafe = false; }
 
     __try {
         if (g_mainRenderTargetView) {
@@ -486,6 +487,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             static bool bHasAutoOpened = false;
 
             if (g_bIsSafe) {
+                // In-Game Mode
                 if (!bHasAutoOpened) {
                     g_ShowMenu = true;
                     bHasAutoOpened = true;
@@ -500,9 +502,11 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 }
             }
             else {
+                // Main Menu / Transition Mode
                 bHasAutoOpened = false;
                 ImGui::GetIO().MouseDrawCursor = false;
 
+                // Only draw overlay if memory looks valid enough
                 if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
                     ImGui::SetNextWindowPos(ImVec2(10, 10));
                     ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
