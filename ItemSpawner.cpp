@@ -2,7 +2,8 @@
 #include "ItemDatabase.h"
 #include "SDKGlobal.h"
 #include "imgui.h"
-#include "imgui_style.h" // [Fix] Required for CustomButton
+#include "imgui_style.h"
+#include "Hooking.h" // [FIX] Required for IsGarbagePtr/IsValidObject
 #include <iostream>
 #include <string>
 #include <algorithm>
@@ -19,7 +20,8 @@ SDK::FString StdToFString(const std::string& str) {
 }
 
 SDK::UObject* FindRealInventoryData() {
-    if (!SDK::UObject::GObjects) return nullptr;
+    // [CRITICAL FIX] Verify GObjects validity
+    if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return nullptr;
 
     static SDK::UClass* TargetClass = SDK::UObject::FindObject<SDK::UClass>("Class Pal.PalPlayerInventoryData");
     if (!TargetClass) TargetClass = SDK::UObject::FindObject<SDK::UClass>("PalPlayerInventoryData");
@@ -28,7 +30,7 @@ SDK::UObject* FindRealInventoryData() {
     // Quick heuristic scan to find a valid inventory
     for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
         SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
-        if (!Obj) continue;
+        if (!IsValidObject(Obj)) continue; // [FIX] Use strict validation
 
         if (Obj->IsA(TargetClass)) {
             std::string name = Obj->GetName();
@@ -46,6 +48,9 @@ SDK::UObject* FindRealInventoryData() {
 // [Fix] Signature now accepts const char* string, not FName
 void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) {
     if (!pInventory) { std::cout << "[-] Method 1: Inventory null." << std::endl; return; }
+
+    // [FIX] Safety Check
+    if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
     static auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fn) {
@@ -65,6 +70,7 @@ void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) 
 // [Fix] Signature now accepts const char* string, not FName
 void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory, const char* ItemID, int32_t Count) {
     if (!pInventory || !pController) return;
+    if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
     // 1. Add Locally
     static auto fnAdd = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");

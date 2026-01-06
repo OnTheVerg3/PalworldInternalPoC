@@ -76,6 +76,8 @@ void InitModuleBounds() {
     }
 }
 
+// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
+
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -130,7 +132,7 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    g_bIsSafe = false;
+    g_bIsSafe = false; // CUT LINE IMMEDIATELY
 
     g_pLocal = nullptr;
     g_pController = nullptr;
@@ -227,15 +229,13 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. STRICT VALIDATION [TOP PRIORITY]
-    // Checks Bounds (prevents 0x3d... crashes) and Alignment (prevents 0xFF... crashes).
-    // We MUST Drop invalid objects, even during Shutdown.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+    // 1. GARBAGE FILTER
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
         return;
     }
 
     // 2. UNSAFE MODE (Pass-Through)
-    // If valid but unsafe state, pass to engine.
+    // If shutting down/loading, pass blindly to engine. No validation logic.
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
@@ -245,12 +245,17 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. WHITE-LIST FILTER
+    // 4. STRICT VALIDATION
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return;
+    }
+
+    // 5. WHITE-LIST FILTER
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 5. SAFE MODE LOGIC
+    // 6. SAFE MODE LOGIC
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
 
@@ -484,9 +489,14 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (g_ShowMenu) {
                 ImGui::GetIO().MouseDrawCursor = true;
 
-                // [FIX] MENU SAFETY
-                // Do not draw menu if not safe. Prevents reading dead GObjects.
-                if (g_bIsSafe) {
+                // [FIX] Double-Check Global Safety
+                // Prevents 0x8 crash by ensuring GObjects is valid before drawing menu.
+                bool bObjectsValid = false;
+                if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
+                    bObjectsValid = true;
+                }
+
+                if (g_bIsSafe && bObjectsValid) {
                     Menu::Draw();
                 }
                 else {

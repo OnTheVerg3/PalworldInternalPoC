@@ -37,15 +37,27 @@ namespace Features {
 
     SDK::UFunction* GetCachedFunc(const char* name) {
         static std::unordered_map<std::string, SDK::UFunction*> cache;
-        if (cache.find(name) == cache.end()) {
-            SDK::UFunction* fn = SDK::UObject::FindObject<SDK::UFunction>(name);
-            if (fn) cache[name] = fn;
-            return fn;
+
+        // Return cached if exists
+        if (cache.find(name) != cache.end()) {
+            return cache[name];
         }
-        return cache[name];
+
+        // [CRITICAL FIX] Verify GObjects before scanning
+        // Prevents 0x8 crash during world exit
+        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
+            return nullptr;
+        }
+
+        SDK::UFunction* fn = SDK::UObject::FindObject<SDK::UFunction>(name);
+        if (fn) cache[name] = fn;
+        return fn;
     }
 
     void RunLoop_Logic() {
+        // [SAFETY] Double check globals
+        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
+
         SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
 
         if (!pLocal || IsBadReadPtr(pLocal, 8)) return;
@@ -75,7 +87,6 @@ namespace Features {
             if (pWeapon->ownWeaponStaticData && !IsBadReadPtr(pWeapon->ownWeaponStaticData, 8)) {
 
                 if (g_LastWeapon != pWeapon) {
-                    // [FIX] Using IsBadReadPtr instead of IsValidPtr to fix C3861
                     if (g_LastWeapon && !IsBadReadPtr(g_LastWeapon, 8) && g_LastWeapon->ownWeaponStaticData && g_OriginalStats.bSaved) {
                         g_LastWeapon->ownWeaponStaticData->AttackValue = g_OriginalStats.Attack;
                     }
