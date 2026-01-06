@@ -30,7 +30,7 @@ SDK::UObject* g_pParam = nullptr;
 // Time-Based Latches
 ULONGLONG g_TimePlayerDetected = 0;
 ULONGLONG g_TimePlayerLost = 0;
-ULONGLONG g_ExitCooldown = 0; // [NEW] Cooldown to prevent hooking too fast on re-join
+ULONGLONG g_ExitCooldown = 0; // Cooldown to prevent re-hooking during shutdown
 
 std::atomic<bool> g_bIsSafe(false);
 
@@ -55,7 +55,7 @@ HWND g_window = nullptr;
 
 // UI STATE
 bool g_ShowMenu = false;
-bool g_bHasAutoOpened = false; // [MOVED] To Global so we can reset it
+bool g_bHasAutoOpened = false;
 
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 Present oPresent;
@@ -159,7 +159,7 @@ void PerformWorldExit() {
     // 4. Reset ALL Subsystems
     Features::Reset();
     Player::Reset();
-    Menu::Reset(); // [NEW] Reset Menu State (Tabs)
+    Menu::Reset();
 
     // 5. Reset UI State
     g_ShowMenu = false;
@@ -242,6 +242,7 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     return false;
 }
 
+// Helper: Lightweight VTable Check (Fixes 0xFF crash without freezing on DLLs)
 bool HasValidVTable(void* pObject) {
     __try {
         if (!pObject) return false;
@@ -258,25 +259,32 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     if (g_GameBase == 0) InitModuleBounds();
 
     __try {
-        // 1. GARBAGE FILTER
+        // 1. GARBAGE FILTER (Pointer Itself)
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-        // 2. VTABLE SANITY
-        if (!HasValidVTable(pObject)) return;
+        // 2. VTABLE SANITY (The "Zombie" Filter)
+        // [CRITICAL] Check BOTH Object and Function.
+        // If pFunction is a zombie (0xFF), passing it to oProcessEvent crashes.
+        if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
+            return; // Drop Zombie Objects
+        }
 
-        // 3. UNSAFE MODE "TRY-PASS"
+        // 3. UNSAFE MODE "TRY-PASS" (Soft Detach)
+        // If exiting, we pass everything VALID to the engine.
+        // We wrap it in a try-catch so if the engine *does* crash, we catch it.
         if (!g_bIsSafe) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
         }
 
-        // 4. WHITELIST
+        // 4. WHITELIST OPTIMIZATION
+        // Only process our specific tracked objects.
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
         }
 
-        // 5. CHECK EXIT
+        // 5. GET NAME & CHECK FOR EXIT
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
         if (name[0] == '\0') {
@@ -289,7 +297,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
             __except (1) { return; }
         }
 
-        // 6. LOGIC
+        // 6. CHEAT LOGIC
         bool bBlock = false;
         __try { bBlock = ProcessEvent_Logic(pObject, pFunction, name); }
         __except (1) { bBlock = false; }
@@ -299,6 +307,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
+        // Fallback: Drop the call if our logic crashed.
         return;
     }
 }
@@ -410,7 +419,7 @@ void AttachPlayerHooks_Logic() {
 
     if (pLocal != g_LastLocalPlayer) {
         std::cout << "[System] New Player Detected." << std::endl;
-        // Caches already cleared by PerformWorldExit, but good redundancy
+        // Redundant reset for safety on new world load
         Features::Reset();
         g_LastLocalPlayer = pLocal;
     }
@@ -433,7 +442,7 @@ void AttachPlayerHooks_Logic() {
 void Present_Logic() {
     ULONGLONG CurrentTime = GetTickCount64();
 
-    // [NEW] Cooldown Check
+    // [NEW] Cooldown Check: Don't touch memory for 3s after exit
     if (CurrentTime < g_ExitCooldown) {
         g_bIsSafe = false;
         return;
@@ -451,7 +460,6 @@ void Present_Logic() {
         if (g_TimePlayerLost == 0) g_TimePlayerLost = CurrentTime;
 
         if ((CurrentTime - g_TimePlayerLost) > 1000) {
-            // Only trigger cleanup if we haven't already (check cooldown)
             if (g_LastLocalPlayer != nullptr) {
                 PerformWorldExit();
                 g_TimePlayerDetected = 0;
@@ -531,7 +539,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                 }
             }
             else {
-                // Ensure UI state matches Unsafe mode
+                // Not Safe (Menu/Loading/Exit)
                 ImGui::GetIO().MouseDrawCursor = false;
 
                 if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
