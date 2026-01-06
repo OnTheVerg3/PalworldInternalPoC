@@ -59,13 +59,16 @@ namespace Features {
         if (!IsValidObject(pLocal)) return;
         if (!IsValidObject(pLocal->CharacterParameterComponent)) return;
 
+        // --- INFINITE STAMINA ---
         if (bInfiniteStamina) {
-            static auto fnResetSP = GetCachedFunc("Function Pal.PalCharacterParameterComponent.ResetSP");
+            // [FIX] Removed 'static' to prevent stale pointers across world loads
+            auto fnResetSP = GetCachedFunc("Function Pal.PalCharacterParameterComponent.ResetSP");
             if (fnResetSP && IsValidObject(fnResetSP)) {
                 pLocal->CharacterParameterComponent->ProcessEvent(fnResetSP, nullptr);
             }
         }
 
+        // --- WEAPON LOGIC ---
         if (!IsValidObject(pLocal->ShooterComponent)) return;
 
         auto pWeapon = pLocal->ShooterComponent->HasWeapon;
