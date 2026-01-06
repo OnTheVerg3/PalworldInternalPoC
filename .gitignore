@@ -11,4 +11,6 @@ x64/
 *.vcxproj
 *.hpp
 *.inl
+.gitignore
 *.gitignore
+auto_sync.py
