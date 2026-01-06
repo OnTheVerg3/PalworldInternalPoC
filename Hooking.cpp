@@ -134,6 +134,7 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
+    // Soft Detach: Stop all logic, release pointers.
     g_bIsSafe = false;
 
     g_pLocal = nullptr;
@@ -142,6 +143,8 @@ void PerformWorldExit() {
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
+        // We do NOT disable hooks via MinHook to avoid deadlocks.
+        // We just clear our tracking so we know to re-hook later.
         g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
@@ -174,6 +177,8 @@ bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
+
+        // Only capture mouse if In-Game. 
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
@@ -201,6 +206,7 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
+// --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
@@ -209,7 +215,11 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     }
 
     if (Features::bInfiniteDurability) {
-        if (RawStrContains(name, "UpdateDurability") || RawStrContains(name, "Deterioration") || RawStrContains(name, "Broken")) return true;
+        if (RawStrContains(name, "UpdateDurability") ||
+            RawStrContains(name, "Deterioration") ||
+            RawStrContains(name, "Broken")) {
+            return true;
+        }
     }
 
     if (Features::bInfiniteAmmo) {
@@ -284,11 +294,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
         // 5. GET NAME & CHECK FOR EXIT
         char name[256];
-        GetNameSafe(pObject, name, sizeof(name)); // Use pObject? GetNameSafe takes UObject*.
-        // Wait, GetNameSafe takes pObject inside. But we usually check pFunction name.
-        // Let's get FUNCTION name for triggers.
         GetNameSafe(pFunction, name, sizeof(name));
-
         if (name[0] == '\0') {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
