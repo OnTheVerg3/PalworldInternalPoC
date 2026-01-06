@@ -20,7 +20,7 @@
 bool Hooking::bFoundValidTraffic = false;
 std::vector<void*> g_ActiveHooks;
 std::vector<void*> g_HookedObjects;
-std::mutex g_HookMutex; // [CRITICAL] This mutex now protects Caches + Hooks
+std::mutex g_HookMutex;
 
 // --- FAST ACCESS CACHE ---
 extern SDK::APalPlayerCharacter* g_pLocal;
@@ -133,8 +133,8 @@ bool IsValidSignature(uintptr_t addr) {
 }
 
 // --- CLEANUP HELPER ---
-void PerformWorldExit() {
-    // 1. Force Unsafe Mode
+// [FIX] NoInline to prevent SEH conflict (C2712)
+__declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
 
@@ -142,32 +142,30 @@ void PerformWorldExit() {
     g_pController = nullptr;
     g_pParam = nullptr;
 
-    // [FIX] LOCK MUTEX DURING RESET
-    // This prevents hkPresent (Render Thread) from accessing vectors 
-    // while we are clearing them here (Game Thread).
-    {
-        std::lock_guard<std::mutex> lock(g_HookMutex);
+    // [FIX] Manual lock instead of lock_guard to avoid destructor unwinding logic
+    g_HookMutex.lock();
+    g_ActiveHooks.clear();
+    g_HookedObjects.clear();
+    g_bPawnHooked = false;
+    g_bControllerHooked = false;
+    g_bParamHooked = false;
+    g_LastLocalPlayer = nullptr;
+    g_HookMutex.unlock();
 
-        g_ActiveHooks.clear();
-        g_HookedObjects.clear();
-        g_bPawnHooked = false;
-        g_bControllerHooked = false;
-        g_bParamHooked = false;
-        g_LastLocalPlayer = nullptr;
-
-        Features::Reset();
-        Player::Reset();
-        Menu::Reset();
-    }
+    Features::Reset();
+    Player::Reset();
+    Menu::Reset();
 
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    std::cout << "[Jarvis] World Exit Cleanup Complete. Cooldown Active." << std::endl;
+    // cout is safe here because function is noinline
+    std::cout << "[Jarvis] World Exit Cleanup Complete. Entering Cooldown." << std::endl;
 }
 
 // --- AUTO-DETACH HELPER ---
-bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
+// [FIX] NoInline to prevent SEH conflict
+__declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
         RawStrContains(name, "ClientReturnToMainMenu") ||
@@ -241,14 +239,20 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 }
 
 // [HARDENED] Strict VTable Check
-bool HasValidVTable(void* pObject) {
+// [FIX] NoInline to be safe
+__declspec(noinline) bool HasValidVTable(void* pObject) {
     __try {
         if (!pObject) return false;
         void* vtable = *(void**)pObject;
 
+        // Garbage Filter
         if (IsGarbagePtr(vtable)) return false;
-        if ((uintptr_t)vtable < 0x10000000) return false; // Threshold for 64-bit pointers
-        if ((uintptr_t)vtable % 8 != 0) return false; // Alignment check
+
+        // 256MB Threshold
+        if ((uintptr_t)vtable < 0x10000000) return false;
+
+        // Alignment Filter
+        if ((uintptr_t)vtable % 8 != 0) return false;
 
         return true;
     }
@@ -263,9 +267,9 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         // 1. GARBAGE FILTER
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-        // 2. VTABLE SANITY (Zombie Filter)
+        // 2. VTABLE SANITY
         if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
-            return;
+            return; // Drop Zombie
         }
 
         // 3. UNSAFE MODE "BLIND PASS"
@@ -417,12 +421,14 @@ void AttachPlayerHooks_Logic() {
     g_pParam = pLocal->CharacterParameterComponent;
 
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] New Player Detected." << std::endl;
-        // Lock Reset just in case
-        {
-            std::lock_guard<std::mutex> lock(g_HookMutex);
-            Features::Reset();
-        }
+        std::cout << "[System] New Player Detected. Flushing Caches." << std::endl;
+
+        // Manual lock here too just in case
+        g_HookMutex.lock();
+        Features::Reset();
+        Player::Reset();
+        g_HookMutex.unlock();
+
         g_LastLocalPlayer = pLocal;
     }
 
@@ -483,15 +489,13 @@ void Present_Logic() {
     g_bIsSafe = true;
     AttachPlayerHooks_Logic();
 
-    // [FIX] LOCK MUTEX DURING UPDATES
-    // This prevents access violation if Reset happens on Game Thread
-    {
-        std::lock_guard<std::mutex> lock(g_HookMutex);
-        __try { Features::RunLoop(); }
-        __except (1) {}
-        __try { Player::Update(pLocal); }
-        __except (1) {}
-    }
+    // Lock updates to prevent race with Reset
+    g_HookMutex.lock();
+    __try { Features::RunLoop(); }
+    __except (1) {}
+    __try { Player::Update(pLocal); }
+    __except (1) {}
+    g_HookMutex.unlock();
 }
 
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
