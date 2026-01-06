@@ -80,8 +80,7 @@ void InitModuleBounds() {
     }
 }
 
-// [FIX] NoInline required here because it creates std::string (destructor)
-// If inlined into GetNameSafe (which uses __try), it causes C2712.
+// [FIX] NoInline to avoid C2712 (std::string destructor vs __try)
 __declspec(noinline) void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -135,7 +134,7 @@ bool IsValidSignature(uintptr_t addr) {
 }
 
 // --- CLEANUP HELPER ---
-// [FIX] NoInline to prevent SEH conflict in callers
+// [FIX] NoInline + Manual Lock to avoid C2712
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
@@ -144,7 +143,6 @@ __declspec(noinline) void PerformWorldExit() {
     g_pController = nullptr;
     g_pParam = nullptr;
 
-    // Manual lock to avoid lock_guard destructor unwinding issues
     g_HookMutex.lock();
 
     g_ActiveHooks.clear();
@@ -163,12 +161,11 @@ __declspec(noinline) void PerformWorldExit() {
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    // std::cout is safe here because function is noinline
     std::cout << "[Jarvis] World Exit Cleanup Complete. Entering Cooldown." << std::endl;
 }
 
 // --- AUTO-DETACH HELPER ---
-// [FIX] NoInline to prevent SEH conflict in hkProcessEvent
+// [FIX] NoInline to avoid C2712
 __declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
@@ -243,15 +240,15 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 }
 
 // [HARDENED] Strict VTable Check
-// [FIX] NoInline to prevent SEH conflict
+// [FIX] NoInline to avoid C2712
 __declspec(noinline) bool HasValidVTable(void* pObject) {
     __try {
         if (!pObject) return false;
         void* vtable = *(void**)pObject;
 
         if (IsGarbagePtr(vtable)) return false;
-        if ((uintptr_t)vtable < 0x10000000) return false; // 256MB Threshold
-        if ((uintptr_t)vtable % 8 != 0) return false; // Alignment
+        if ((uintptr_t)vtable < 0x10000000) return false;
+        if ((uintptr_t)vtable % 8 != 0) return false;
 
         return true;
     }
@@ -263,29 +260,26 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     if (g_GameBase == 0) InitModuleBounds();
 
     __try {
-        // 1. GARBAGE FILTER (Pointer Itself)
+        // 1. GARBAGE FILTER
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-        // 2. VTABLE SANITY (The "Zombie" Filter)
-        // [CRITICAL] Check BOTH Object and Function.
-        // If pFunction is a zombie (0xFF), passing it to oProcessEvent crashes.
+        // 2. VTABLE SANITY (Zombie Filter)
         if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
-            return; // Drop Zombie Objects
+            return; // Drop Zombie
         }
 
-        // 3. UNSAFE MODE "BLIND PASS" (Hands Off Approach)
-        // If we are exiting/unsafe, we pass EVERYTHING valid to the engine.
-        // We do NOT filter by string. We trust the engine to clean up valid objects.
+        // 3. UNSAFE MODE "BLIND PASS"
+        // Hands-Off approach: Trust the VTable check, pass everything else to engine.
         if (!g_bIsSafe) {
             __try {
                 return oProcessEvent(pObject, pFunction, pParams);
             }
             __except (1) {
-                return; // Swallow engine crashes during teardown
+                return; // Swallow crash
             }
         }
 
-        // 4. WHITELIST OPTIMIZATION (Safe Mode Only)
+        // 4. WHITELIST OPTIMIZATION
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
@@ -535,35 +529,35 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
-            // Lock UI to prevent Race Condition with Reset
-            {
-                std::lock_guard<std::mutex> lock(g_HookMutex);
+            // [FIX] C2712: Replaced lock_guard with manual lock/unlock
+            g_HookMutex.lock();
 
-                if (g_bIsSafe) {
-                    if (!g_bHasAutoOpened) {
-                        g_ShowMenu = true;
-                        g_bHasAutoOpened = true;
-                    }
+            if (g_bIsSafe) {
+                if (!g_bHasAutoOpened) {
+                    g_ShowMenu = true;
+                    g_bHasAutoOpened = true;
+                }
 
-                    if (g_ShowMenu) {
-                        ImGui::GetIO().MouseDrawCursor = true;
-                        Menu::Draw();
-                    }
-                    else {
-                        ImGui::GetIO().MouseDrawCursor = false;
-                    }
+                if (g_ShowMenu) {
+                    ImGui::GetIO().MouseDrawCursor = true;
+                    Menu::Draw();
                 }
                 else {
                     ImGui::GetIO().MouseDrawCursor = false;
-
-                    if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
-                        ImGui::SetNextWindowPos(ImVec2(10, 10));
-                        ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-                        ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
-                        ImGui::End();
-                    }
                 }
             }
+            else {
+                ImGui::GetIO().MouseDrawCursor = false;
+
+                if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
+                    ImGui::SetNextWindowPos(ImVec2(10, 10));
+                    ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
+                    ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
+                    ImGui::End();
+                }
+            }
+
+            g_HookMutex.unlock(); // Manual unlock before ImGui::Render()
 
             ImGui::Render();
             g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
