@@ -161,9 +161,8 @@ __declspec(noinline) void PerformWorldExit() {
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    // [FIX] Removed Async Detach to prevent Freeze.
-    // We now rely on the Selective Filter in hkProcessEvent.
-    std::cout << "[Jarvis] World Exit Cleanup Complete. Entering Cooldown." << std::endl;
+    // [FIX] Removed Async Detach. We now rely on Selective Filtering in the hook.
+    std::cout << "[Jarvis] World Exit Confirmed. Selective Filter Engaged." << std::endl;
 }
 
 // --- AUTO-DETACH HELPER ---
@@ -272,35 +271,37 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
 
-        // [FIX] If name is unreadable, DROP IT. Do not pass to engine.
+        // [SAFETY] If name is missing, assume it's unsafe/garbage and drop it.
         if (name[0] == '\0') return;
 
-        // If Exit Trigger detected, set Unsafe Mode
+        // If Exit Trigger detected, set Unsafe Mode and engage Filter
         if (CheckAndPerformAutoDetach(pObject, name)) {
-            // Pass the exit signal safely
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
         }
 
-        // 4. UNSAFE MODE "SELECTIVE PASS" [CRITICAL FIX]
+        // 4. UNSAFE MODE "SELECTIVE FILTER" [CRITICAL FIX]
         // If we are shutting down (Unsafe Mode), we ONLY pass cleanup functions.
-        // We BLOCK all logic/update functions to prevent the 0x38 crash.
+        // We BLOCK all logic/update functions (Ticks, Anims) which cause the 0xFF crash.
         if (!g_bIsSafe) {
             if (RawStrContains(name, "ReceiveDestroyed") ||
                 RawStrContains(name, "ReceiveEndPlay") ||
                 RawStrContains(name, "Close") ||
                 RawStrContains(name, "Exit") ||
                 RawStrContains(name, "Shutdown") ||
-                RawStrContains(name, "Travel"))
+                RawStrContains(name, "Travel") ||
+                RawStrContains(name, "Unload"))
             {
+                // Allow cleanup to proceed
                 __try { return oProcessEvent(pObject, pFunction, pParams); }
                 __except (1) { return; }
             }
-            // Block everything else (Ticks, Updates, etc.)
+            // BLOCK everything else (Update, Tick, ServerMove, etc.)
             return;
         }
 
         // 5. WHITELIST OPTIMIZATION (Safe Mode)
+        // Only process our players when we are safely in-game.
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
