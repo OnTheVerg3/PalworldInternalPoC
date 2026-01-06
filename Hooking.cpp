@@ -76,8 +76,6 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
-
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -132,7 +130,7 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    g_bIsSafe = false; // CUT LINE IMMEDIATELY
+    g_bIsSafe = false;
 
     g_pLocal = nullptr;
     g_pController = nullptr;
@@ -184,7 +182,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
 // --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
-    // This logic only runs if g_bIsSafe is TRUE
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
             Hooking::bFoundValidTraffic = true;
@@ -218,19 +215,21 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. GARBAGE FILTER (Always Active)
-    // Filters Sentinels (0xFF) and NULLs. Prevents 0xFF crashes.
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
+    // 1. CRITICAL VALIDATION [Fixes 0xFF, 0x3d, and 0x3f80... Crashes]
+    // We strictly filter garbage/sentinel/zombie pointers FIRST.
+    // If an object fails this check, it is unusable and MUST be dropped.
+    // NOTE: Valid objects being destroyed will PASS this check.
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction) || !IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return;
+    }
 
-    // 2. GET FUNCTION NAME (Safely)
+    // 2. GET FUNCTION NAME
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
-
-    // If we can't get a name, the object/function is likely corrupt. Drop it.
     if (name[0] == '\0') return;
 
-    // 3. DESTRUCTION CHECK (High Priority)
-    // We MUST pass these events to the engine, even if Unsafe, to prevent Freezes.
+    // 3. DESTRUCTION PASS-THROUGH (Prevent Freeze)
+    // If the object is valid but being destroyed, let the engine handle it.
     bool bIsDestruction = RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay");
 
     if (bIsDestruction) {
@@ -240,26 +239,19 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
             g_pParam = nullptr;
             g_bIsSafe = false;
         }
-        // Pass to engine so it can clean up
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. UNSAFE MODE FILTER
-    // If we are shutting down, and it wasn't a Destruction event (checked above),
-    // then it's a random gameplay event attempting to run on dead memory.
-    // DROP IT to prevent 0xFF/0x8 crashes.
+    // 4. UNSAFE MODE FILTER (Prevent Random Gameplay Crashes)
+    // If we are shutting down (and it's not a destruction event), drop it.
     if (!g_bIsSafe) return;
 
-    // 5. STRICT VALIDATION (Safe Mode)
-    // We are in-game. Ensure objects are strictly valid (No Zombies).
-    if (!IsValidObject(pObject)) return;
-
-    // 6. WHITE-LIST FILTER
+    // 5. WHITE-LIST FILTER
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 7. CHEAT LOGIC
+    // 6. CHEAT LOGIC
     bool bBlock = false;
     __try {
         bBlock = ProcessEvent_Logic(pObject, pFunction, name);
@@ -356,7 +348,6 @@ SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
         if (!IsValidObject(pPC)) return nullptr;
 
         SDK::APawn* pPawn = pPC->Pawn;
-        // Strict Check for Pawn
         if (!IsValidObject(pPawn)) return nullptr;
 
         char nameBuf[256];
@@ -490,15 +481,13 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
                     Menu::Draw();
                 }
                 else {
-                    // [FIX] Validate GObjects Pointer casting to bypass Error E0413
-                    // We only attempt to draw if the game structure is valid
                     bool bGlobalsValid = false;
+                    // Safe Cast
                     if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
                         bGlobalsValid = true;
                     }
 
                     if (bGlobalsValid) {
-                        // Draw "Safe" Overlay
                         ImGui::SetNextWindowPos(ImVec2(10, 10));
                         ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
                         ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
