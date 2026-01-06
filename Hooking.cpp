@@ -20,7 +20,7 @@
 bool Hooking::bFoundValidTraffic = false;
 std::vector<void*> g_ActiveHooks;
 std::vector<void*> g_HookedObjects;
-std::mutex g_HookMutex;
+std::mutex g_HookMutex; // [CRITICAL] This mutex now protects Caches + Hooks
 
 // --- FAST ACCESS CACHE ---
 extern SDK::APalPlayerCharacter* g_pLocal;
@@ -134,6 +134,7 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
+    // 1. Force Unsafe Mode
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
 
@@ -141,24 +142,28 @@ void PerformWorldExit() {
     g_pController = nullptr;
     g_pParam = nullptr;
 
+    // [FIX] LOCK MUTEX DURING RESET
+    // This prevents hkPresent (Render Thread) from accessing vectors 
+    // while we are clearing them here (Game Thread).
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
+
         g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
         g_bControllerHooked = false;
         g_bParamHooked = false;
         g_LastLocalPlayer = nullptr;
-    }
 
-    Features::Reset();
-    Player::Reset();
-    Menu::Reset();
+        Features::Reset();
+        Player::Reset();
+        Menu::Reset();
+    }
 
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    std::cout << "[Jarvis] World Exit Cleanup Complete. Entering Cooldown." << std::endl;
+    std::cout << "[Jarvis] World Exit Cleanup Complete. Cooldown Active." << std::endl;
 }
 
 // --- AUTO-DETACH HELPER ---
@@ -235,21 +240,15 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     return false;
 }
 
-// [HARDENED] Strict VTable Check to filter Zombies
+// [HARDENED] Strict VTable Check
 bool HasValidVTable(void* pObject) {
     __try {
         if (!pObject) return false;
         void* vtable = *(void**)pObject;
 
-        // Garbage Filter
         if (IsGarbagePtr(vtable)) return false;
-
-        // [FIX] Increased threshold to 0x10000000 (256MB)
-        // This effectively blocks "float-as-pointer" garbage like 0x3d9c04
-        if ((uintptr_t)vtable < 0x10000000) return false;
-
-        // Alignment Filter (Ptrs are 8-byte aligned)
-        if ((uintptr_t)vtable % 8 != 0) return false;
+        if ((uintptr_t)vtable < 0x10000000) return false; // Threshold for 64-bit pointers
+        if ((uintptr_t)vtable % 8 != 0) return false; // Alignment check
 
         return true;
     }
@@ -261,28 +260,25 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     if (g_GameBase == 0) InitModuleBounds();
 
     __try {
-        // 1. GARBAGE FILTER (Fastest)
+        // 1. GARBAGE FILTER
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-        // 2. VTABLE SANITY (The "Zombie" Filter)
-        // We drop bad objects HERE. 
+        // 2. VTABLE SANITY (Zombie Filter)
         if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
-            return; // Drop Zombie
+            return;
         }
 
-        // 3. UNSAFE MODE "BLIND PASS" (Hands Off Approach)
-        // If we are exiting/unsafe, we pass EVERYTHING valid to the engine.
-        // We do NOT filter by string. We trust the engine to clean up valid objects.
+        // 3. UNSAFE MODE "BLIND PASS"
         if (!g_bIsSafe) {
             __try {
                 return oProcessEvent(pObject, pFunction, pParams);
             }
             __except (1) {
-                return; // Swallow engine crashes during teardown
+                return; // Swallow crash
             }
         }
 
-        // 4. WHITELIST OPTIMIZATION (Safe Mode Only)
+        // 4. WHITELIST OPTIMIZATION
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
@@ -421,9 +417,12 @@ void AttachPlayerHooks_Logic() {
     g_pParam = pLocal->CharacterParameterComponent;
 
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] New Player Detected. Flushing Caches." << std::endl;
-        Features::Reset();
-        Player::Reset();
+        std::cout << "[System] New Player Detected." << std::endl;
+        // Lock Reset just in case
+        {
+            std::lock_guard<std::mutex> lock(g_HookMutex);
+            Features::Reset();
+        }
         g_LastLocalPlayer = pLocal;
     }
 
@@ -484,10 +483,15 @@ void Present_Logic() {
     g_bIsSafe = true;
     AttachPlayerHooks_Logic();
 
-    __try { Features::RunLoop(); }
-    __except (1) {}
-    __try { Player::Update(pLocal); }
-    __except (1) {}
+    // [FIX] LOCK MUTEX DURING UPDATES
+    // This prevents access violation if Reset happens on Game Thread
+    {
+        std::lock_guard<std::mutex> lock(g_HookMutex);
+        __try { Features::RunLoop(); }
+        __except (1) {}
+        __try { Player::Update(pLocal); }
+        __except (1) {}
+    }
 }
 
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
