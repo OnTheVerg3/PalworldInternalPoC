@@ -3,7 +3,7 @@
 #include <d3d11.h>
 #include <dxgi.h>
 #include <vector>
-#include <cstdint>
+#include <cstdint> // Required for uintptr_t
 #include "SDKGlobal.h"
 
 // --- GLOBAL BOUNDS (Defined in Hooking.cpp) ---
@@ -11,46 +11,51 @@ extern uintptr_t g_GameBase;
 extern uintptr_t g_GameSize;
 
 // --- MEMORY SAFETY INTERFACE (INLINE) ---
+// These are defined INLINE to prevent LNK2001 errors in other modules.
 
 inline bool IsSentinel(void* ptr) {
     return (uintptr_t)ptr == 0xFFFFFFFFFFFFFFFF;
 }
 
+// Lowered threshold to prevent false positives on valid low-mem objects
 inline bool IsGarbagePtr(void* ptr) {
     uintptr_t addr = (uintptr_t)ptr;
     if (!ptr) return true;
     if (IsSentinel(ptr)) return true;
     if (addr < 0x10000) return true; // 64KB null partition
-    if (addr > 0x7FFFFFFFFFFF) return true; // User mode limit
-    if (addr % 8 != 0) return true; // Alignment check
+    if (addr > 0x7FFFFFFFFFFF) return true;
+    if (addr % 8 != 0) return true;
     return false;
 }
 
-// [CRITICAL UPDATE] Safe Validation without IsBadReadPtr
-// Uses SEH (__try/__except) to safely check pointers.
+inline bool IsValidPtr(void* ptr) {
+    if (IsGarbagePtr(ptr)) return false;
+    return !IsBadReadPtr(ptr, 8);
+}
+
+// [CRITICAL UPDATE] Module-Bound Validation
+// Prevents 0x0000000000524ab8 crashes by ensuring VTable is in the Game Module.
 inline bool IsValidObject(SDK::UObject* pObj) {
-    // 1. Pointer Check
-    if (IsGarbagePtr(pObj)) return false;
+    if (!IsValidPtr(pObj)) return false;
 
-    __try {
-        // 2. VTable Dereference
-        void** vtablePtr = reinterpret_cast<void**>(pObj);
-        void* vtable = *vtablePtr;
+    // 1. Read VTable Pointer
+    void** vtablePtr = reinterpret_cast<void**>(pObj);
+    if (IsBadReadPtr(vtablePtr, 8)) return false;
 
-        // 3. VTable Garbage Check
-        if (IsGarbagePtr(vtable)) return false;
+    void* vtable = *vtablePtr;
 
-        // 4. MODULE BOUNDS CHECK
-        // Valid VTables MUST be in the Game Module (.rdata).
-        if (g_GameBase != 0 && g_GameSize != 0) {
-            uintptr_t vtAddr = (uintptr_t)vtable;
-            if (vtAddr < g_GameBase || vtAddr >(g_GameBase + g_GameSize)) {
-                return false; // Zombie/Heap Object -> Drop
-            }
+    // 2. Garbage Check
+    if (IsGarbagePtr(vtable)) return false;
+    if (IsBadReadPtr(vtable, 8)) return false;
+
+    // 3. MODULE BOUNDS CHECK (The Fix)
+    // A valid VTable MUST exist within the game's executable memory.
+    // If it points to the Heap (low address), it is a Zombie/Fake object.
+    if (g_GameBase != 0 && g_GameSize != 0) {
+        uintptr_t vtAddr = (uintptr_t)vtable;
+        if (vtAddr < g_GameBase || vtAddr >(g_GameBase + g_GameSize)) {
+            return false; // Drop it!
         }
-    }
-    __except (1) {
-        return false; // Crashed reading VTable -> Invalid
     }
 
     return true;
@@ -66,6 +71,8 @@ public:
     static void Shutdown();
     static void AttachPlayerHooks();
     static void ProbeVTable(int index);
+
+    // Public accessor for the menu/teleporter
     static SDK::APalPlayerCharacter* GetLocalPlayerSafe();
 
     static bool bFoundValidTraffic;

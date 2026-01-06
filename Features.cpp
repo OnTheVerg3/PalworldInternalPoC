@@ -32,8 +32,6 @@ namespace Features {
     void Reset() {
         g_LastWeapon = nullptr;
         g_OriginalStats.bSaved = false;
-        // If we cached other pointers (like cached UFunctions), we might clear them too, 
-        // but UFunctions usually persist. Weapon pointers definitely do not.
         std::cout << "[Features] State reset." << std::endl;
     }
 
@@ -77,12 +75,8 @@ namespace Features {
             if (pWeapon->ownWeaponStaticData && !IsBadReadPtr(pWeapon->ownWeaponStaticData, 8)) {
 
                 if (g_LastWeapon != pWeapon) {
-                    // [CRITICAL FIX] Verify g_LastWeapon is valid before cleaning up
-                    // This prevents crashes if the old weapon was destroyed
-                    if (g_LastWeapon && IsValidPtr(g_LastWeapon) && g_LastWeapon->ownWeaponStaticData && g_OriginalStats.bSaved) {
-                        // Only restore if pointer is still valid (unlikely during world switch, but good for weapon swap)
-                        // Actually, checking IsValidPtr is risky if memory was reallocated.
-                        // This is why Reset() is mandatory on World Change.
+                    // [CRITICAL FIX] Use IsBadReadPtr directly to resolve C3861 build error
+                    if (g_LastWeapon && !IsBadReadPtr(g_LastWeapon, 8) && g_LastWeapon->ownWeaponStaticData && g_OriginalStats.bSaved) {
                         g_LastWeapon->ownWeaponStaticData->AttackValue = g_OriginalStats.Attack;
                     }
 
