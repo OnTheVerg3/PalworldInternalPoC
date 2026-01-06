@@ -155,13 +155,11 @@ void PerformWorldExit() {
 }
 
 // --- AUTO-DETACH HELPER ---
-// Detects Player destruction and unhooks safely
 bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
         if (pObject == g_pLocal) {
             std::cout << "[Jarvis] World Exit Detected. Detaching Hooks..." << std::endl;
 
-            // Disable hooks safely using RAII lock
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
                 for (void* pHook : g_ActiveHooks) {
@@ -242,30 +240,30 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. ABSOLUTE UNSAFE BYPASS [CRITICAL FIX]
-    // If not safe, pass execution IMMEDIATELY. Do not check pointers. Do not collect $200.
-    if (!g_bIsSafe) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // 2. GARBAGE POINTER CHECK
-    // If the pointer address itself is junk (0xFF or NULL), we MUST drop it.
-    // Passing this to oProcessEvent (even blindly) will crash the engine.
+    // 1. POINTER SANITY
     if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
         return;
     }
 
-    // 3. WHITELIST OPTIMIZATION (Prevent 0xFF Reads)
-    // If the object is NOT one of our tracked objects, we pass it immediately.
-    // We do NOT call IsValidObject or GetNameSafe on random objects.
-    // This protects us from reading memory of random dying actors.
-    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
+    // 2. STRICT VALIDATION [CRITICAL FIX]
+    // We MUST validate the object BEFORE we do anything else.
+    // If we blindly pass a garbage pointer (like 0x3f...) to the engine, it crashes.
+    // This check filters out Zombies and Floats.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return; // Drop bad objects
+    }
+
+    // 3. UNSAFE MODE PASS-THROUGH
+    // Now that we know the object is VALID, if we are in Unsafe Mode (Exit),
+    // we MUST pass it to the engine to allow cleanup (EndPlay/Destroy).
+    if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. STRICT VALIDATION (Only for tracked objects)
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
+    // 4. WHITELIST OPTIMIZATION
+    // If safe, only process our whitelisted objects. Pass others immediately.
+    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
+        return oProcessEvent(pObject, pFunction, pParams);
     }
 
     // 5. GET NAME & CHECK EXIT
@@ -273,7 +271,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     GetNameSafe(pFunction, name, sizeof(name));
     if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
 
-    // If this returns true, it means we detected exit, disabled hooks, and are now unsafe.
+    // If we detect destruction, disable hooks and allow pass-through
     if (CheckAndPerformAutoDetach(pObject, name)) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
