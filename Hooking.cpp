@@ -158,7 +158,6 @@ void PerformWorldExit() {
 }
 
 // --- AUTO-DETACH HELPER ---
-// Detects if the player is being destroyed and triggers Soft Detach
 bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
@@ -180,7 +179,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         g_ShowMenu = !g_ShowMenu;
 
         // Only capture mouse if In-Game. 
-        // In Main Menu, g_bIsSafe is false, so we never trap the cursor.
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
@@ -243,73 +241,62 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // WRAP EVERYTHING IN EXCEPTION HANDLER
-    __try {
-        // 1. GARBAGE FILTER [ABSOLUTE PRIORITY]
-        // Checks pointer alignment and bounds. Does NOT dereference.
-        if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
-            return;
-        }
-
-        // 2. VTABLE SANITY CHECK [FIX FOR 0xFF CRASH]
-        // We MUST verify the VTable is valid BEFORE passing to oProcessEvent.
-        // Even in "Unsafe Mode", we cannot pass a Zombie (0xFF vtable) to the engine.
-        // If we dereference *pObject and get -1, we DROP it.
-        bool bVTableValid = false;
-        __try {
-            void* vtable = *(void**)pObject;
-            // Check if VTable pointer itself is garbage (0xFF, NULL, unaligned)
-            if (!IsGarbagePtr(vtable) && (uintptr_t)vtable > 0x10000) {
-                bVTableValid = true;
-            }
-        }
-        __except (1) { bVTableValid = false; }
-
-        if (!bVTableValid) return; // Drop Bad Object (Do NOT Pass)
-
-        // 3. UNSAFE MODE BYPASS [FIX FOR FREEZE]
-        // Now that we know the object is physically valid (has a VTable), 
-        // if we are in Shutdown/Unsafe Mode, we PASS it. 
-        // This allows valid objects to clean up (EndPlay), preventing the freeze.
-        if (!g_bIsSafe) {
-            return oProcessEvent(pObject, pFunction, pParams);
-        }
-
-        // 4. WHITELIST OPTIMIZATION
-        // Only process our specific tracked objects.
-        if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
-            return oProcessEvent(pObject, pFunction, pParams);
-        }
-
-        // 5. GET NAME & CHECK FOR EXIT
-        char name[256];
-        GetNameSafe(pFunction, name, sizeof(name));
-        if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
-
-        // If we detect destruction, we trigger Soft Detach immediately.
-        // This sets g_bIsSafe = false, enabling the pass-through for future calls.
-        if (CheckAndPerformAutoDetach(pObject, name)) {
-            return oProcessEvent(pObject, pFunction, pParams);
-        }
-
-        // 6. CHEAT LOGIC (Only runs if Safe)
-        bool bBlock = false;
-        __try {
-            bBlock = ProcessEvent_Logic(pObject, pFunction, name);
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            bBlock = false;
-        }
-
-        if (bBlock) return;
-
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        // [CRITICAL] If we crash anywhere above (e.g. reading a dying object's name),
-        // we DROP the call. Do NOT retry oProcessEvent, as that might be what caused the crash.
+    // 1. GARBAGE FILTER [ABSOLUTE PRIORITY]
+    // Filter out 0xFF (Sentinel) and NULLs.
+    // If we pass these to oProcessEvent, it WILL crash.
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
         return;
     }
+
+    // 2. UNSAFE MODE "TRY-PASS" [CRITICAL FIX]
+    // If not Safe (Exit Mode), we pass execution to the engine.
+    // BUT we wrap it in a try-catch.
+    // If the object is valid -> It runs (No Freeze).
+    // If the object is Zombie/Bad -> It crashes -> We Catch -> Return (No Crash).
+    if (!g_bIsSafe) {
+        __try {
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+        __except (1) {
+            return; // Swallow the 0xFF crash
+        }
+    }
+
+    // 3. WHITELIST OPTIMIZATION
+    if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
+        return oProcessEvent(pObject, pFunction, pParams);
+    }
+
+    // 4. VTABLE SANITY (Safe Mode Only)
+    // In-game, we can be strict to prevent reading garbage names.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+        return;
+    }
+
+    // 5. GET NAME & CHECK FOR EXIT
+    char name[256];
+    GetNameSafe(pFunction, name, sizeof(name));
+    if (name[0] == '\0') return oProcessEvent(pObject, pFunction, pParams);
+
+    // If we detect destruction, trigger Soft Detach
+    if (CheckAndPerformAutoDetach(pObject, name)) {
+        // Pass the exit signal safely
+        __try { return oProcessEvent(pObject, pFunction, pParams); }
+        __except (1) { return; }
+    }
+
+    // 6. CHEAT LOGIC (Only runs if Safe)
+    bool bBlock = false;
+    __try {
+        bBlock = ProcessEvent_Logic(pObject, pFunction, name);
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        bBlock = false;
+    }
+
+    if (bBlock) return;
+
+    return oProcessEvent(pObject, pFunction, pParams);
 }
 
 // --- HOOKING HELPERS ---
