@@ -80,7 +80,9 @@ void InitModuleBounds() {
     }
 }
 
-void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
+// [FIX] NoInline required here because it creates std::string (destructor)
+// If inlined into GetNameSafe (which uses __try), it causes C2712.
+__declspec(noinline) void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
         strcpy_s(outBuf, size, s.c_str());
@@ -133,7 +135,7 @@ bool IsValidSignature(uintptr_t addr) {
 }
 
 // --- CLEANUP HELPER ---
-// NoInline to prevent SEH conflict
+// [FIX] NoInline to prevent SEH conflict in callers
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_ExitCooldown = GetTickCount64() + 3000;
@@ -142,7 +144,7 @@ __declspec(noinline) void PerformWorldExit() {
     g_pController = nullptr;
     g_pParam = nullptr;
 
-    // Lock to ensure atomic reset vs Render Thread
+    // Manual lock to avoid lock_guard destructor unwinding issues
     g_HookMutex.lock();
 
     g_ActiveHooks.clear();
@@ -161,11 +163,12 @@ __declspec(noinline) void PerformWorldExit() {
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
+    // std::cout is safe here because function is noinline
     std::cout << "[Jarvis] World Exit Cleanup Complete. Entering Cooldown." << std::endl;
 }
 
 // --- AUTO-DETACH HELPER ---
-// NoInline to prevent SEH conflict
+// [FIX] NoInline to prevent SEH conflict in hkProcessEvent
 __declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
@@ -240,7 +243,7 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 }
 
 // [HARDENED] Strict VTable Check
-// NoInline to be safe
+// [FIX] NoInline to prevent SEH conflict
 __declspec(noinline) bool HasValidVTable(void* pObject) {
     __try {
         if (!pObject) return false;
@@ -260,27 +263,29 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     if (g_GameBase == 0) InitModuleBounds();
 
     __try {
-        // 1. GARBAGE FILTER
+        // 1. GARBAGE FILTER (Pointer Itself)
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
 
-        // 2. VTABLE SANITY (Zombie Filter)
+        // 2. VTABLE SANITY (The "Zombie" Filter)
+        // [CRITICAL] Check BOTH Object and Function.
+        // If pFunction is a zombie (0xFF), passing it to oProcessEvent crashes.
         if (!HasValidVTable(pObject) || !HasValidVTable(pFunction)) {
-            return;
+            return; // Drop Zombie Objects
         }
 
-        // 3. UNSAFE MODE "BLIND PASS"
-        // If unsafe, we pass everything VALID to the engine blindly.
-        // We TRUST the VTable check above to catch the garbage.
+        // 3. UNSAFE MODE "BLIND PASS" (Hands Off Approach)
+        // If we are exiting/unsafe, we pass EVERYTHING valid to the engine.
+        // We do NOT filter by string. We trust the engine to clean up valid objects.
         if (!g_bIsSafe) {
             __try {
                 return oProcessEvent(pObject, pFunction, pParams);
             }
             __except (1) {
-                return; // Swallow crash
+                return; // Swallow engine crashes during teardown
             }
         }
 
-        // 4. WHITELIST OPTIMIZATION
+        // 4. WHITELIST OPTIMIZATION (Safe Mode Only)
         if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
             __try { return oProcessEvent(pObject, pFunction, pParams); }
             __except (1) { return; }
@@ -530,7 +535,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
-            // [FIX] CRITICAL SECTION: Lock UI Logic to prevent drawing while Reset happens
+            // Lock UI to prevent Race Condition with Reset
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
 
