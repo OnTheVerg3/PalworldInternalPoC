@@ -489,21 +489,17 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (g_ShowMenu) {
                 ImGui::GetIO().MouseDrawCursor = true;
 
-                // [FIX] Double-Check Global Safety
-                // Prevents 0x8 crash by ensuring GObjects is valid before drawing menu.
-                bool bObjectsValid = false;
-                if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
-                    bObjectsValid = true;
-                }
-
-                if (g_bIsSafe && bObjectsValid) {
+                // [CRITICAL FIX] MENU SAFETY
+                // Menu only draws when we are DEFINITELY in-game and safe.
+                // Prevents 0xFF/0x8 crashes during world transition.
+                if (g_bIsSafe) {
                     Menu::Draw();
                 }
                 else {
-                    // Render simple "Waiting" text to show injection is alive
+                    // Safe Overlay - No SDK Access
                     ImGui::SetNextWindowPos(ImVec2(10, 10));
                     ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-                    ImGui::TextColored(ImVec4(1, 1, 0, 1), "Game Loading / Closing...");
+                    ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World to Access Menu");
                     ImGui::End();
                 }
             }

@@ -5,6 +5,9 @@
 #include <unordered_map>
 #include <windows.h> 
 
+// Access external safe flag
+extern std::atomic<bool> g_bIsSafe;
+
 namespace Features {
     bool bInfiniteStamina = false;
     bool bInfiniteAmmo = false;
@@ -34,25 +37,15 @@ namespace Features {
     void Reset() {
         g_LastWeapon = nullptr;
         g_OriginalStats.bSaved = false;
-
-        // [CRITICAL FIX] Clear cached UFunctions on level transition
-        // Prevents using dead pointers in the next world (which causes 2nd entry crash)
         g_FuncCache.clear();
-
         std::cout << "[Features] State and Cache reset." << std::endl;
     }
 
     SDK::UFunction* GetCachedFunc(const char* name) {
-        // Return cached if exists
         auto it = g_FuncCache.find(name);
-        if (it != g_FuncCache.end()) {
-            return it->second;
-        }
+        if (it != g_FuncCache.end()) return it->second;
 
-        // [SAFETY] Verify GObjects before scanning
-        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
-            return nullptr;
-        }
+        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return nullptr;
 
         SDK::UFunction* fn = SDK::UObject::FindObject<SDK::UFunction>(name);
         if (fn) g_FuncCache[name] = fn;
@@ -60,6 +53,9 @@ namespace Features {
     }
 
     void RunLoop_Logic() {
+        // [FIX] Abort if unsafe/exit mode
+        if (!g_bIsSafe) return;
+
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
         SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
