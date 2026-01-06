@@ -76,8 +76,6 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
-
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -132,7 +130,7 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    g_bIsSafe = false; // CUT LINE IMMEDIATELY
+    g_bIsSafe = false;
 
     g_pLocal = nullptr;
     g_pController = nullptr;
@@ -229,15 +227,15 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. GARBAGE FILTER (Top Priority)
-    // Filters Sentinels (0xFF) and NULLs. Prevents 0xFF crashes.
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) {
+    // 1. STRICT VALIDATION [TOP PRIORITY]
+    // Checks Bounds (prevents 0x3d... crashes) and Alignment (prevents 0xFF... crashes).
+    // We MUST Drop invalid objects, even during Shutdown.
+    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
     // 2. UNSAFE MODE (Pass-Through)
-    // If shutting down/loading, pass blindly to engine. No heavy validation.
-    // This allows the engine to handle its own cleanup (even if it looks like garbage to us).
+    // If valid but unsafe state, pass to engine.
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
@@ -247,18 +245,12 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 4. STRICT VALIDATION (Safe Mode Only)
-    // In-game, we reject Zombies (Heap VTables) to prevent 0x3d... crashes.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
-        return;
-    }
-
-    // 5. WHITE-LIST FILTER
+    // 4. WHITE-LIST FILTER
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 6. SAFE MODE LOGIC
+    // 5. SAFE MODE LOGIC
     char name[256];
     GetNameSafe(pFunction, name, sizeof(name));
 
@@ -492,17 +484,16 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (g_ShowMenu) {
                 ImGui::GetIO().MouseDrawCursor = true;
 
-                // [CRITICAL FIX] STRICT MENU SAFETY
-                // Menu is ONLY allowed when Player is valid and game is stable.
-                // This prevents 0x8 Crash (Reading dead GObjects).
+                // [FIX] MENU SAFETY
+                // Do not draw menu if not safe. Prevents reading dead GObjects.
                 if (g_bIsSafe) {
                     Menu::Draw();
                 }
                 else {
-                    // Optional: Show "Waiting..." overlay
+                    // Render simple "Waiting" text to show injection is alive
                     ImGui::SetNextWindowPos(ImVec2(10, 10));
                     ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-                    ImGui::TextColored(ImVec4(1, 1, 0, 1), "[!] Waiting for Gameplay...");
+                    ImGui::TextColored(ImVec4(1, 1, 0, 1), "Game Loading / Closing...");
                     ImGui::End();
                 }
             }
