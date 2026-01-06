@@ -51,7 +51,9 @@ ID3D11Device* g_pd3dDevice = nullptr;
 ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 HWND g_window = nullptr;
-bool g_ShowMenu = true;
+
+// [UPDATE] Default to false so Main Menu is clickable immediately
+bool g_ShowMenu = false;
 
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 Present oPresent;
@@ -132,16 +134,15 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    // 1. Cut the line immediately
     g_bIsSafe = false;
 
-    // 2. Clear pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
 
     {
         std::lock_guard<std::mutex> lock(g_HookMutex);
+        g_ActiveHooks.clear();
         g_HookedObjects.clear();
         g_bPawnHooked = false;
         g_bControllerHooked = false;
@@ -149,7 +150,6 @@ void PerformWorldExit() {
         g_LastLocalPlayer = nullptr;
     }
 
-    // 3. Reset Feature Caches
     Features::Reset();
     Player::Reset();
 }
@@ -158,14 +158,19 @@ void PerformWorldExit() {
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
-        if (g_pd3dDevice) {
+
+        // Update Cursor immediately to feel responsive
+        if (g_pd3dDevice && g_bIsSafe) { // Only force cursor if in-game
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
             if (g_ShowMenu) ClipCursor(nullptr);
         }
         return 0;
     }
 
-    if (g_ShowMenu) {
+    // [FIX] Main Menu Input Logic
+    // We only block input if the menu is Open AND we are In-Game (Safe).
+    // If we are in the Main Menu (!g_bIsSafe), we pass input through so you can click buttons.
+    if (g_ShowMenu && g_bIsSafe) {
         if (g_pd3dDevice) {
             ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
         }
@@ -179,16 +184,16 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         case WM_KEYDOWN: case WM_KEYUP:
         case WM_SYSKEYDOWN: case WM_SYSKEYUP:
         case WM_CHAR:
-            return 1;
+            return 1; // Block Game Input
         }
     }
+
+    // Pass to Game
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
 // --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
-    // Note: We handle Destruction events in the main hook now for safety.
-
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
             Hooking::bFoundValidTraffic = true;
@@ -222,47 +227,34 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // [STEP 1] POINTER SANITY (Fast)
-    // If the pointer itself is -1 or null, return immediately.
-    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return;
-
-    // [STEP 2] OBJECT VALIDITY (Strict)
-    // We verify the VTable is valid and inside the game module.
-    // If this fails, the object is a ZOMBIE. We MUST DROP IT.
-    // Passing a Zombie to oProcessEvent (even for destruction) causes the 0xFF crash.
-    if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
+    if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction) || !IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
-    // [STEP 3] UNSAFE MODE PASS-THROUGH (Prevent Freeze)
-    // If the object passed Step 2, it is VALID.
-    // If we are shutting down (!g_bIsSafe), we let the engine process it.
-    // This allows the engine to call EndPlay/Destroy on valid objects without freezing.
+    char name[256];
+    GetNameSafe(pFunction, name, sizeof(name));
+    if (name[0] == '\0') return;
+
+    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
+        if (pObject == g_pLocal) {
+            // [JARVIS] Auto-Detach Logic
+            // Unload hooks before the world dies to prevent race conditions.
+            {
+                std::lock_guard<std::mutex> lock(g_HookMutex);
+                for (void* pHook : g_ActiveHooks) {
+                    MH_DisableHook(pHook);
+                }
+            }
+            PerformWorldExit();
+            return oProcessEvent(pObject, pFunction, pParams);
+        }
+    }
+
     if (!g_bIsSafe) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // [STEP 4] SAFE MODE CHECKS
-    // Game is running. Apply Whitelist.
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // [STEP 5] CHEAT LOGIC
-    char name[256];
-    GetNameSafe(pFunction, name, sizeof(name));
-    if (name[0] == '\0') {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
-    // Detect Self-Destruction in Safe Mode to trigger Exit Logic
-    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
-        if (pObject == g_pLocal) {
-            g_pLocal = nullptr;
-            g_pController = nullptr;
-            g_pParam = nullptr;
-            g_bIsSafe = false; // Trigger Unsafe Mode for subsequent calls
-        }
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
@@ -297,20 +289,13 @@ bool HookIndex(SDK::UObject* pObject, int index, const char* debugName) {
 
     if (!bAlreadyTracked) {
         MH_STATUS status = MH_CreateHook(pTarget, &hkProcessEvent, (void**)&oProcessEvent);
-        if (status == MH_OK) {
+        if (status == MH_OK || status == MH_ERROR_ALREADY_CREATED) {
             MH_EnableHook(pTarget);
             {
                 std::lock_guard<std::mutex> lock(g_HookMutex);
                 g_ActiveHooks.push_back(pTarget);
             }
             std::cout << "[+] Hooked " << debugName << std::endl;
-        }
-        else if (status == MH_ERROR_ALREADY_CREATED) {
-            MH_EnableHook(pTarget);
-            {
-                std::lock_guard<std::mutex> lock(g_HookMutex);
-                g_ActiveHooks.push_back(pTarget);
-            }
         }
         else {
             return false;
@@ -391,8 +376,6 @@ void AttachPlayerHooks_Logic() {
     g_pController = pLocal->Controller;
     g_pParam = pLocal->CharacterParameterComponent;
 
-    // [CRITICAL] RESET CACHES ON PLAYER CHANGE
-    // If we loaded a new world (pointer changed), wipe old function pointers.
     if (pLocal != g_LastLocalPlayer) {
         if (g_LastLocalPlayer != nullptr) {
             Features::Reset();
@@ -494,24 +477,37 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             ImGui_ImplWin32_NewFrame();
             ImGui::NewFrame();
 
-            if (g_ShowMenu) {
-                ImGui::GetIO().MouseDrawCursor = true;
+            // [FIX] Auto-Open Menu Latch
+            // Resets every time you leave the world so it re-opens next join
+            static bool bHasAutoOpened = false;
 
-                if (g_bIsSafe) {
+            if (g_bIsSafe) {
+                // We are In-Game
+                if (!bHasAutoOpened) {
+                    g_ShowMenu = true;
+                    bHasAutoOpened = true;
+                }
+
+                if (g_ShowMenu) {
+                    ImGui::GetIO().MouseDrawCursor = true;
                     Menu::Draw();
                 }
                 else {
-                    // Safe Overlay - Only draw if GObjects is vaguely valid
-                    if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
-                        ImGui::SetNextWindowPos(ImVec2(10, 10));
-                        ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
-                        ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
-                        ImGui::End();
-                    }
+                    ImGui::GetIO().MouseDrawCursor = false;
                 }
             }
             else {
-                ImGui::GetIO().MouseDrawCursor = false;
+                // We are in Main Menu / Loading
+                bHasAutoOpened = false; // Reset Latch
+                ImGui::GetIO().MouseDrawCursor = false; // Never capture mouse here
+
+                // Draw Overlay (Always visible)
+                if (SDK::UObject::GObjects && !IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) {
+                    ImGui::SetNextWindowPos(ImVec2(10, 10));
+                    ImGui::Begin("Overlay", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoBackground);
+                    ImGui::TextColored(ImVec4(0, 1, 0, 1), "[+] JARVIS ACTIVE - Load World");
+                    ImGui::End();
+                }
             }
 
             ImGui::Render();
