@@ -31,13 +31,14 @@ SDK::UObject* g_pParam = nullptr;
 
 // Flags
 std::atomic<bool> g_bIsSafe(false);
+std::atomic<bool> g_PendingExit(false); // [FIX] New flag to signal Render Thread
 
 bool g_ShowMenu = false;
 bool g_bHasAutoOpened = false;
 
 // Helpers
 void* g_LastLocalPlayer = nullptr;
-ULONGLONG g_TimePlayerDetected = 0; // [RESTORED] Stabilization Timer
+ULONGLONG g_TimePlayerDetected = 0;
 ULONGLONG g_ExitCooldown = 0;
 
 // Rendering
@@ -99,12 +100,14 @@ bool RawStrContains(const char* haystack, const char* needle) {
 // --- CLEANUP (RESTORE ORIGINAL STATE) ---
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
+    g_PendingExit = false; // Reset signal
     g_ExitCooldown = GetTickCount64() + 3000;
-    g_TimePlayerDetected = 0; // [FIX] Reset stabilization timer so we wait on next join
+    g_TimePlayerDetected = 0;
 
+    // We are on Render Thread, so we can safely lock without deadlocking Game Thread
     g_HookMutex.lock();
 
-    // 1. Restore VTables (Unhook instantly)
+    // 1. Restore VTables
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
     g_ParamHook.Restore();
@@ -125,23 +128,24 @@ __declspec(noinline) void PerformWorldExit() {
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    std::cout << "[Jarvis] World Exit: Hooks Restored. Returning to vanilla state." << std::endl;
+    std::cout << "[Jarvis] World Exit: Hooks Restored. State Cleared." << std::endl;
 }
 
 // --- DETACH CHECKER ---
-__declspec(noinline) bool CheckAndPerformAutoDetach(SDK::UObject* pObject, const char* name) {
+// [FIX] Now only sets a flag. Does NOT lock mutex.
+__declspec(noinline) void CheckForExit(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
         RawStrContains(name, "ClientReturnToMainMenu") ||
         RawStrContains(name, "ClientTravel"))
     {
         if (pObject == g_pLocal || pObject == g_pController) {
-            std::cout << "[Jarvis] Exit detected via: " << name << std::endl;
-            PerformWorldExit();
-            return true;
+            if (!g_PendingExit) {
+                std::cout << "[Jarvis] Exit detected via: " << name << ". Scheduling Cleanup." << std::endl;
+                g_PendingExit = true; // Signal Render Thread to handle cleanup
+            }
         }
     }
-    return false;
 }
 
 // --- INPUT HANDLER ---
@@ -191,13 +195,15 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
         if (name[0] != '\0') {
-            if (CheckAndPerformAutoDetach(pObject, name)) {
+            // [FIX] Just check for exit flag, don't run logic
+            CheckForExit(pObject, name);
+
+            // If exit pending, pass through immediately
+            if (g_PendingExit || !g_bIsSafe) {
                 return oFunc(pObject, pFunction, pParams);
             }
 
-            if (g_bIsSafe) {
-                if (ProcessEvent_Logic(pObject, pFunction, name)) return; // Block
-            }
+            if (ProcessEvent_Logic(pObject, pFunction, name)) return;
         }
 
         return oFunc(pObject, pFunction, pParams);
@@ -247,7 +253,6 @@ void AttachPlayerHooks_Logic() {
         g_pController = pLocal->Controller;
         g_pParam = pLocal->CharacterParameterComponent;
 
-        // --- APPLY VMT HOOKS ---
         if (g_PawnHook.Init(pLocal)) {
             g_PawnHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
             std::cout << "[+] Pawn Hooked (VMT)" << std::endl;
@@ -269,9 +274,13 @@ void AttachPlayerHooks_Logic() {
 }
 
 void Present_Logic() {
-    ULONGLONG CurrentTime = GetTickCount64();
+    // [FIX] Check for pending exit signal from Game Thread
+    if (g_PendingExit) {
+        PerformWorldExit(); // Execute cleanup on Render Thread (Safe!)
+        return;
+    }
 
-    // 1. Exit Cooldown (Shutdown Phase)
+    ULONGLONG CurrentTime = GetTickCount64();
     if (CurrentTime < g_ExitCooldown) {
         g_bIsSafe = false;
         return;
@@ -279,17 +288,19 @@ void Present_Logic() {
 
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) {
-        if (g_LastLocalPlayer != nullptr) PerformWorldExit();
+        if (g_LastLocalPlayer != nullptr) {
+            std::cout << "[Jarvis] Player pointer lost. Triggering exit." << std::endl;
+            PerformWorldExit();
+        }
         return;
     }
 
-    // 2. Stabilization Phase (New World Load)
+    // Stabilization Logic
     if (g_TimePlayerDetected == 0) {
         g_TimePlayerDetected = CurrentTime;
         std::cout << "[System] Player detected. Stabilizing (3s)..." << std::endl;
     }
 
-    // Wait 3 seconds before hooking to avoid interrupting initialization
     if ((CurrentTime - g_TimePlayerDetected) < 3000) {
         g_bIsSafe = false;
         return;
