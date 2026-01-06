@@ -76,8 +76,6 @@ void InitModuleBounds() {
     }
 }
 
-// NOTE: IsValidObject moved to Hooking.h for inline optimization & LNK2001 fix
-
 void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
     if (s.length() < size) {
@@ -132,7 +130,7 @@ bool IsValidSignature(uintptr_t addr) {
 
 // --- CLEANUP HELPER ---
 void PerformWorldExit() {
-    g_bIsSafe = false; // CUT LINE IMMEDIATELY
+    g_bIsSafe = false;
 
     g_pLocal = nullptr;
     g_pController = nullptr;
@@ -184,17 +182,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 
 // --- LOGIC HELPER ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
-    // Critical Self-Destruction Check
-    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay")) {
-        if (pObject == g_pLocal) {
-            g_pLocal = nullptr;
-            g_pController = nullptr;
-            g_pParam = nullptr;
-            g_bIsSafe = false;
-        }
-        return false;
-    }
-
     if (!Hooking::bFoundValidTraffic) {
         if (RawStrContains(name, "Server") || RawStrContains(name, "Client")) {
             Hooking::bFoundValidTraffic = true;
@@ -228,41 +215,43 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // 1. STRICT VALIDATION [TOP PRIORITY]
-    // We verify the object's VTable is within the game module.
-    // This catches Zombies (0x54e661) and Garbage (0xFF...) immediately.
-    // If it fails, we DROP it. No excuses.
+    // 1. ZOMBIE FILTER [TOP PRIORITY]
+    // We check IsValidObject FIRST. This validates that the VTable is inside the Game Module.
+    // This catches 0xFF... (Sentinels), 0x3f... (Floats), and 0x4ab... (Heap Zombies).
+    // If an object fails this, it is dead. Drop it immediately.
     if (!IsValidObject(pObject) || !IsValidObject(pFunction)) {
         return;
     }
 
-    // 2. UNSAFE MODE (Pass-Through)
-    // If the object is valid, but we are shutting down (!g_bIsSafe), we PASS it.
-    // This prevents the Freeze by allowing the engine to destroy its valid objects.
-    if (!g_bIsSafe) {
+    // 2. GET FUNCTION NAME
+    char name[256];
+    GetNameSafe(pFunction, name, sizeof(name));
+    if (name[0] == '\0') return;
+
+    // 3. DESTRUCTION PASS-THROUGH (Prevents Freeze)
+    // If the object IS Valid, and the engine wants to destroy it, let it pass.
+    bool bIsDestruction = RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "EndPlay");
+
+    if (bIsDestruction) {
+        if (pObject == g_pLocal) {
+            g_pLocal = nullptr;
+            g_pController = nullptr;
+            g_pParam = nullptr;
+            g_bIsSafe = false;
+        }
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 3. WORLD VALIDITY CHECKS
-    if (!SDK::pGWorld || !*SDK::pGWorld) {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
+    // 4. UNSAFE MODE FILTER (Prevents Gameplay Crashes)
+    // If not destroying, and safe mode is off, drop it.
+    if (!g_bIsSafe) return;
 
-    // 4. WHITE-LIST FILTER
-    // Optimization: Only hook what we need.
+    // 5. WHITE-LIST FILTER
     if (pObject != g_pLocal && pObject != g_pController && pObject != g_pParam) {
         return oProcessEvent(pObject, pFunction, pParams);
     }
 
-    // 5. SAFE MODE LOGIC
-    // We are in-game and the object is ours. Run features.
-    char name[256];
-    GetNameSafe(pFunction, name, sizeof(name));
-
-    if (name[0] == '\0') {
-        return oProcessEvent(pObject, pFunction, pParams);
-    }
-
+    // 6. CHEAT LOGIC
     bool bBlock = false;
     __try {
         bBlock = ProcessEvent_Logic(pObject, pFunction, name);
@@ -489,7 +478,6 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
             if (g_ShowMenu) {
                 ImGui::GetIO().MouseDrawCursor = true;
 
-                // [FIX] MENU SAFETY
                 if (g_bIsSafe) {
                     Menu::Draw();
                 }

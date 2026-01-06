@@ -42,7 +42,6 @@ namespace Features {
         auto it = g_FuncCache.find(name);
         if (it != g_FuncCache.end()) return it->second;
 
-        // [SAFETY] Double check globals
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return nullptr;
 
         SDK::UFunction* fn = SDK::UObject::FindObject<SDK::UFunction>(name);
@@ -51,18 +50,13 @@ namespace Features {
     }
 
     void RunLoop_Logic() {
-        // [SAFETY] 1. Global Safe Flag
         if (!g_bIsSafe) return;
-
-        // [SAFETY] 2. Global Object Array
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
-        // [SAFETY] 3. Local Player & Component Validity
         SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
         if (!IsValidObject(pLocal)) return;
         if (!IsValidObject(pLocal->CharacterParameterComponent)) return;
 
-        // --- INFINITE STAMINA ---
         if (bInfiniteStamina) {
             static auto fnResetSP = GetCachedFunc("Function Pal.PalCharacterParameterComponent.ResetSP");
             if (fnResetSP && IsValidObject(fnResetSP)) {
@@ -70,11 +64,8 @@ namespace Features {
             }
         }
 
-        // --- WEAPON LOGIC ---
-        // [SAFETY] Check ShooterComponent
         if (!IsValidObject(pLocal->ShooterComponent)) return;
 
-        // [SAFETY] Check Weapon
         auto pWeapon = pLocal->ShooterComponent->HasWeapon;
         if (!IsValidObject(pWeapon)) {
             g_LastWeapon = nullptr;
@@ -82,19 +73,14 @@ namespace Features {
             return;
         }
 
-        // 1. AMMO & MAGAZINE
         if (bInfiniteAmmo) pWeapon->IsRequiredBullet = false;
         else pWeapon->IsRequiredBullet = true;
 
         if (bInfiniteMagazine) pWeapon->IsInfinityMagazine = true;
         else pWeapon->IsInfinityMagazine = false;
 
-        // 2. STAT MODIFIERS
-        // [SAFETY] Check Static Data
         if (IsValidObject(pWeapon->ownWeaponStaticData)) {
-
             if (g_LastWeapon != pWeapon) {
-                // Restore previous weapon if valid
                 if (g_LastWeapon && IsValidObject(g_LastWeapon) && IsValidObject(g_LastWeapon->ownWeaponStaticData) && g_OriginalStats.bSaved) {
                     g_LastWeapon->ownWeaponStaticData->AttackValue = g_OriginalStats.Attack;
                 }
