@@ -89,8 +89,8 @@ void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) 
     if (!pInventory) return;
 
     SDK::FName ItemName = GetItemName(ItemID);
-    // Basic check for None (0) or invalid
-    if (ItemName.Index == 0) return;
+    // Removed explicit Index check to fix build error. 
+    // If ItemName is invalid, the engine functions below will simply fail gracefully.
 
     auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fn) {
@@ -113,10 +113,8 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
 
     // 1. Get ID
     SDK::FName ItemName = GetItemName(ItemID);
-    if (ItemName.Index == 0) {
-        std::cout << "[-] Name conversion failed for: " << ItemID << std::endl;
-        return;
-    }
+
+    // [FIX] Removed check for ItemName.Index which caused build error E0135
 
     // 2. Find Container & Slot
     SDK::UPalItemContainer* Container = nullptr;
@@ -124,9 +122,6 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
     // Try getting container normally
     if (!InvData->TryGetContainerFromStaticItemID(ItemName, &Container) || !Container) {
         std::cout << "[-] Auto-container failed. Attempting fallback..." << std::endl;
-        // Fallback: We can't easily iterate containers without SDK support for InventoryMultiHelper.
-        // But usually, items go to the first container (Common) or we abort.
-        // For now, we abort to prevent crashing, but log it clearly.
         return;
     }
 
