@@ -18,10 +18,20 @@
 
 #pragma comment(lib, "psapi.lib")
 
+// --- HOOK DEFINITIONS ---
+typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
+typedef HRESULT(__stdcall* ResizeBuffers)(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
+
+Present oPresent;
+ResizeBuffers oResizeBuffers;
+WNDPROC oWndProc;
+
+// --- GLOBALS ---
 VMTHook g_PawnHook;
 VMTHook g_ControllerHook;
 VMTHook g_ParamHook;
 std::mutex g_HookMutex;
+
 SDK::APalPlayerCharacter* g_pLocal = nullptr;
 SDK::UObject* g_pController = nullptr;
 SDK::UObject* g_pParam = nullptr;
@@ -33,6 +43,7 @@ bool g_bHasAutoOpened = false;
 void* g_LastLocalPlayer = nullptr;
 ULONGLONG g_TimePlayerDetected = 0;
 ULONGLONG g_ExitCooldown = 0;
+
 ID3D11Device* g_pd3dDevice = nullptr;
 ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
@@ -40,9 +51,6 @@ HWND g_window = nullptr;
 
 SDK::APalPlayerCharacter* g_ManualPlayer = nullptr;
 
-typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
-Present oPresent;
-WNDPROC oWndProc;
 typedef void(__thiscall* ProcessEvent_t)(SDK::UObject*, SDK::UFunction*, void*);
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -84,11 +92,8 @@ __declspec(noinline) void PerformWorldExit() {
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
-    // Release RTV
-    if (g_mainRenderTargetView) {
-        g_mainRenderTargetView->Release();
-        g_mainRenderTargetView = nullptr;
-    }
+    // [FIX] Do NOT release RTV here. Let ResizeBuffers handle it.
+    // Releasing here can cause race conditions if the game is drawing.
 
     g_HookMutex.lock();
     g_PawnHook.Restore();
@@ -115,16 +120,12 @@ void Hooking::SetManualPlayer(SDK::APalPlayerCharacter* pTarget) {
     std::cout << "[Jarvis] Manual Switch: " << pTarget->GetName() << std::endl;
 
     g_HookMutex.lock();
-    // Unhook current
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
     g_ParamHook.Restore();
-
-    // Set new target
     g_pLocal = nullptr;
-    g_LastLocalPlayer = nullptr; // Trigger re-hook logic next frame
+    g_LastLocalPlayer = nullptr;
     g_ManualPlayer = pTarget;
-
     Features::Reset();
     Player::Reset();
     g_HookMutex.unlock();
@@ -234,9 +235,21 @@ void Present_Logic() {
     g_HookMutex.unlock();
 }
 
+// [NEW] Hook for ResizeBuffers to handle resolution changes / loading screens
+HRESULT __stdcall hkResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
+    // If we have a view, release it immediately. The game is about to destroy the backbuffer.
+    if (g_mainRenderTargetView) {
+        if (g_pd3dContext) g_pd3dContext->OMSetRenderTargets(0, 0, 0); // Unbind
+        g_mainRenderTargetView->Release();
+        g_mainRenderTargetView = nullptr;
+    }
+    return oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
+}
+
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     if (g_GameBase == 0) InitModuleBounds();
 
+    // 1. Initialize Input (Once)
     static bool bInit = false;
     if (!bInit) {
         DXGI_SWAP_CHAIN_DESC sd; pSwapChain->GetDesc(&sd);
@@ -245,42 +258,41 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         ImGui::CreateContext(); ImGui_ImplWin32_Init(g_window); bInit = true;
     }
 
-    // 1. Create RTV
-    ID3D11Texture2D* pBackBuffer = nullptr;
-    pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice);
-    g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
-    pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
-
-    if (FAILED(g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView))) {
-        pBackBuffer->Release();
-        return oPresent(pSwapChain, SyncInterval, Flags);
+    // 2. Initialize Resources (Only when needed - Caching)
+    if (!g_mainRenderTargetView) {
+        ID3D11Texture2D* pBackBuffer = nullptr;
+        pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice);
+        if (g_pd3dDevice) {
+            g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
+            pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
+            if (pBackBuffer) {
+                g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView);
+                pBackBuffer->Release();
+                ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dContext);
+            }
+        }
     }
-    pBackBuffer->Release();
 
-    // 2. Logic
+    // 3. Logic & Rendering
     __try { Present_Logic(); }
     __except (1) { g_bIsSafe = false; }
 
-    // 3. Render
-    ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
-    g_HookMutex.lock();
-    if (g_bIsSafe) {
-        if (!g_bHasAutoOpened) { g_ShowMenu = true; g_bHasAutoOpened = true; }
-        if (g_ShowMenu) { ImGui::GetIO().MouseDrawCursor = true; Menu::Draw(); }
+    if (g_mainRenderTargetView) {
+        ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+        g_HookMutex.lock();
+        if (g_bIsSafe) {
+            if (!g_bHasAutoOpened) { g_ShowMenu = true; g_bHasAutoOpened = true; }
+            if (g_ShowMenu) { ImGui::GetIO().MouseDrawCursor = true; Menu::Draw(); }
+            else ImGui::GetIO().MouseDrawCursor = false;
+        }
         else ImGui::GetIO().MouseDrawCursor = false;
+        g_HookMutex.unlock();
+        ImGui::Render();
+        g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
+        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+        // [FIX] DO NOT RELEASE HERE. We release in hkResizeBuffers.
     }
-    g_HookMutex.unlock();
-    ImGui::Render();
-
-    // 4. Bind & Draw
-    g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-    // 5. [CRITICAL] Unbind & Release RTV immediately
-    ID3D11RenderTargetView* nullViews[] = { nullptr };
-    g_pd3dContext->OMSetRenderTargets(1, nullViews, nullptr);
-    g_mainRenderTargetView->Release();
-    g_mainRenderTargetView = nullptr;
 
     return oPresent(pSwapChain, SyncInterval, Flags);
 }
@@ -296,11 +308,15 @@ void Hooking::Init() {
     ID3D11Device* dev; ID3D11DeviceContext* ctx; IDXGISwapChain* swap;
     if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, levels, 1, D3D11_SDK_VERSION, &scd, &swap, &dev, NULL, &ctx))) {
         DWORD_PTR* vtable = (DWORD_PTR*)swap; vtable = (DWORD_PTR*)vtable[0];
+
         void* presentAddr = (void*)vtable[8];
+        void* resizeAddr = (void*)vtable[13]; // [FIX] Hook ResizeBuffers (Index 13)
+
         swap->Release(); dev->Release(); ctx->Release(); DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
         if (MH_Initialize() == MH_OK) {
             InitModuleBounds();
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
+            MH_CreateHook(resizeAddr, &hkResizeBuffers, (void**)&oResizeBuffers); // [FIX] Apply Hook
             MH_EnableHook(MH_ALL_HOOKS);
         }
     }
