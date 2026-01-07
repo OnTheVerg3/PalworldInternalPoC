@@ -7,7 +7,7 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 #include "Player.h" 
-// [FIX] Removed Teleporter and Visuals includes
+// [FIX] Removed Teleporter/Visuals
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -109,7 +109,6 @@ __declspec(noinline) void PerformWorldExit() {
     Features::Reset();
     Player::Reset();
     Menu::Reset();
-    // [FIX] Removed Teleporter::Reset()
     g_HookMutex.unlock();
 
     g_ShowMenu = false;
@@ -176,8 +175,6 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
     __try {
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
-
-        // [FIX] Removed Teleporter Queue check
 
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
@@ -311,7 +308,6 @@ void Hooking::Init() {
     ID3D11Device* dev; ID3D11DeviceContext* ctx; IDXGISwapChain* swap;
     if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, levels, 1, D3D11_SDK_VERSION, &scd, &swap, &dev, NULL, &ctx))) {
         DWORD_PTR* vtable = (DWORD_PTR*)swap; vtable = (DWORD_PTR*)vtable[0];
-
         void* presentAddr = (void*)vtable[8];
         void* resizeAddr = (void*)vtable[13]; // Hook ResizeBuffers
 
@@ -319,7 +315,7 @@ void Hooking::Init() {
         if (MH_Initialize() == MH_OK) {
             InitModuleBounds();
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
-            MH_CreateHook(resizeAddr, &hkResizeBuffers, (void**)&oResizeBuffers); // Apply Hook
+            MH_CreateHook(resizeAddr, &hkResizeBuffers, (void**)&oResizeBuffers);
             MH_EnableHook(MH_ALL_HOOKS);
         }
     }

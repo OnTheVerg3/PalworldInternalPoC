@@ -85,7 +85,7 @@ void Menu::Draw() {
 
         case 3: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 3.8 (Jarvis)");
+            ImGui::Text("Version 3.9 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
             break;
         }
