@@ -16,7 +16,7 @@
 extern std::vector<uintptr_t> g_PatternMatches;
 extern int g_CurrentMatchIndex;
 
-// --- HELPERS ---
+// --- HELPERS (Internal) ---
 SDK::FString StdToFString(const std::string& str) {
     std::wstring wstr(str.begin(), str.end());
     return SDK::FString(wstr.c_str());
@@ -33,7 +33,6 @@ SDK::FGuid GenerateGuid() {
     return guid;
 }
 
-// [FIX] Brute-force finder for String Library
 SDK::FName GetItemName(const char* ItemID) {
     static SDK::UKismetStringLibrary* Lib = nullptr;
 
@@ -54,7 +53,6 @@ SDK::FName GetItemName(const char* ItemID) {
     return SDK::FName();
 }
 
-// [FIX] Helper to get valid Inventory Data from Player
 SDK::UPalPlayerInventoryData* GetInventory(SDK::APalPlayerCharacter* pLocal) {
     if (!IsValidObject(pLocal)) return nullptr;
 
@@ -67,14 +65,14 @@ SDK::UPalPlayerInventoryData* GetInventory(SDK::APalPlayerCharacter* pLocal) {
     return State->InventoryData;
 }
 
-// --- SPAWN METHODS ---
+// --- SPAWN METHODS (Namespace Scoped) ---
 
-void Spawn_Method1(SDK::APalPlayerCharacter* pLocal, const char* ItemID, int32_t Count) {
+// [FIX] Added ItemSpawner:: prefix to match header declaration
+void ItemSpawner::Spawn_Method1(SDK::APalPlayerCharacter* pLocal, const char* ItemID, int32_t Count) {
     auto InvData = GetInventory(pLocal);
     if (!IsValidObject(InvData)) return;
 
     SDK::FName ItemName = GetItemName(ItemID);
-    // Removed Index check to avoid build errors; reliance on engine failure is safe here.
 
     auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fn) {
@@ -89,7 +87,8 @@ void Spawn_Method1(SDK::APalPlayerCharacter* pLocal, const char* ItemID, int32_t
     }
 }
 
-void Spawn_Method2(SDK::APalPlayerCharacter* pLocal, const char* ItemID, int32_t Count) {
+// [FIX] Added ItemSpawner:: prefix to match header declaration
+void ItemSpawner::Spawn_Method2(SDK::APalPlayerCharacter* pLocal, const char* ItemID, int32_t Count) {
     auto InvData = GetInventory(pLocal);
     if (!IsValidObject(InvData)) return;
 
@@ -151,14 +150,29 @@ void ItemSpawner::DrawTab() {
 
     ImGui::Spacing();
 
-    // ... (List/Grid UI Code omitted for brevity, it is unchanged) ...
-    // Assuming Standard List/Grid Layout Here
-
     // Fallback UI if search/grid code is missing in snippet
     if (ImGui::BeginChild("Items", ImVec2(0, -60), true)) {
-        for (const auto& cat : Database::Categories) {
-            for (const auto& item : cat.Items) {
-                if (ImGui::Selectable(item.Name)) strcpy_s(manualIdBuffer, item.ID);
+        if (strlen(searchBuffer) > 0) {
+            std::string filter = searchBuffer;
+            for (const auto& cat : Database::Categories) {
+                for (const auto& item : cat.Items) {
+                    std::string itemName = item.Name;
+                    auto it = std::search(
+                        itemName.begin(), itemName.end(),
+                        filter.begin(), filter.end(),
+                        [](char ch1, char ch2) { return std::toupper(ch1) == std::toupper(ch2); }
+                    );
+                    if (it != itemName.end()) {
+                        if (ImGui::Selectable(item.Name)) strcpy_s(manualIdBuffer, item.ID);
+                    }
+                }
+            }
+        }
+        else {
+            for (const auto& cat : Database::Categories) {
+                for (const auto& item : cat.Items) {
+                    if (ImGui::Selectable(item.Name)) strcpy_s(manualIdBuffer, item.ID);
+                }
             }
         }
         ImGui::EndChild();
@@ -174,10 +188,10 @@ void ItemSpawner::DrawTab() {
     auto pLocal = Hooking::GetLocalPlayerSafe();
 
     if (CustomButton("SPAWN (SP)", ImVec2(100, 30), false)) {
-        if (pLocal) Spawn_Method1(pLocal, manualIdBuffer, itemQty);
+        if (pLocal) ItemSpawner::Spawn_Method1(pLocal, manualIdBuffer, itemQty);
     }
     ImGui::SameLine();
     if (CustomButton("SPAWN (MP)", ImVec2(100, 30), false)) {
-        if (pLocal) Spawn_Method2(pLocal, manualIdBuffer, itemQty);
+        if (pLocal) ItemSpawner::Spawn_Method2(pLocal, manualIdBuffer, itemQty);
     }
 }
