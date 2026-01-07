@@ -2,6 +2,7 @@
 #include "Hooking.h"
 #include <iostream>
 #include <cstring>
+#include <string> 
 
 namespace Teleporter
 {
@@ -70,33 +71,34 @@ namespace Teleporter
         }
     }
 
-    // [NEW] Implemented Base Teleporter
+    // [FIX] Implemented robust Base Teleporter without strict class dependency
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal)
     {
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
 
         std::cout << "[Jarvis] Scanning for Base Camp..." << std::endl;
 
-        // Iterate GObjects to find a Base Camp Point
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
 
-            // We look for the Level Object representing the center of a base
-            if (Obj->IsA(SDK::APalLevelObjectBaseCampPoint::StaticClass())) {
-                SDK::APalLevelObjectBaseCampPoint* BasePoint = static_cast<SDK::APalLevelObjectBaseCampPoint*>(Obj);
+            // Check if it's an Actor first
+            if (Obj->IsA(SDK::AActor::StaticClass())) {
+                std::string ObjName = Obj->GetName();
 
-                // Teleport to the first one we find.
-                // In singleplayer/co-op, this is usually your base.
-                // In servers, this might be ANY base loaded in memory.
-                SDK::FVector BaseLoc = BasePoint->K2_GetActorLocation();
+                // Flexible check for Base Camp Point
+                if (ObjName.find("PalLevelObjectBaseCampPoint") != std::string::npos) {
 
-                // Add a small offset Z to avoid falling through floor
-                BaseLoc.Z += 150.0f;
+                    // Safe cast to AActor to get location
+                    SDK::AActor* BaseActor = static_cast<SDK::AActor*>(Obj);
+                    SDK::FVector BaseLoc = BaseActor->K2_GetActorLocation();
 
-                std::cout << "[Jarvis] Base found. Teleporting..." << std::endl;
-                TeleportTo(pLocal, BaseLoc);
-                return; // Stop after first one
+                    BaseLoc.Z += 150.0f;
+
+                    std::cout << "[Jarvis] Base found: " << ObjName << ". Teleporting..." << std::endl;
+                    TeleportTo(pLocal, BaseLoc);
+                    return;
+                }
             }
         }
         std::cout << "[-] No Base Camp found in range." << std::endl;

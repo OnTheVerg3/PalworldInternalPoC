@@ -5,7 +5,7 @@
 #include <vector>
 #include <iostream>
 #include <cstdint>
-#include <string> // [FIX] Added for std::wstring
+#include <string> 
 
 // Undefine conflicting macros
 #ifdef DrawText
@@ -93,7 +93,7 @@ namespace SDK {
         return static_cast<APalPlayerCharacter*>(pPawn);
     }
 
-    // [NEW] Helper to execute console commands (FOV, Gamma, etc.)
+    // [FIXED] Uses specific GetDefaultObj instead of generic UObject call
     inline void ExecuteConsoleCommand(const std::string& Command) {
         if (!pGWorld || !*pGWorld) return;
 
@@ -101,7 +101,6 @@ namespace SDK {
         if (!fn) fn = UObject::FindObject<UFunction>("Function Engine.KismetSystemLibrary.ExecuteConsoleCommand");
 
         if (fn) {
-            // Need to convert std::string to FString manually
             std::wstring wCommand(Command.begin(), Command.end());
             FString fCommand(wCommand.c_str());
 
@@ -115,7 +114,8 @@ namespace SDK {
             params.Command = fCommand;
             params.SpecificPlayer = nullptr;
 
-            UObject::GetDefaultObj(UKismetSystemLibrary::StaticClass())->ProcessEvent(fn, &params);
+            // [FIX] Correct way to get the default object for a class in Dumper-7 SDKs
+            UKismetSystemLibrary::GetDefaultObj()->ProcessEvent(fn, &params);
         }
     }
 }
