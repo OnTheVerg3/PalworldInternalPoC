@@ -5,22 +5,9 @@
 #include <string> 
 #include <algorithm> 
 
-extern ID3D11DeviceContext* g_pd3dContext;
-extern ID3D11RenderTargetView* g_mainRenderTargetView;
-extern ULONGLONG g_TeleportCooldown;
-
 namespace Teleporter
 {
     std::vector<CustomWaypoint> Waypoints;
-    bool bTeleportPending = false;
-    bool bExecuteRPC = false;
-    SDK::FVector TargetLocation = { 0, 0, 0 };
-
-    void Reset() {
-        bTeleportPending = false;
-        bExecuteRPC = false;
-        // Keep waypoints, just clear state
-    }
 
     void CallFn(SDK::UObject* obj, const char* fnName, void* params = nullptr) {
         if (!IsValidObject(obj)) return;
@@ -28,40 +15,20 @@ namespace Teleporter
         if (fn) obj->ProcessEvent(fn, params);
     }
 
-    void QueueTeleport(SDK::FVector Location) {
-        TargetLocation = Location;
-        bTeleportPending = true;
-    }
-
-    void ProcessQueue_RenderThread() {
-        if (!bTeleportPending) return;
-        if (g_pd3dContext) {
-            ID3D11RenderTargetView* nullViews[] = { nullptr };
-            g_pd3dContext->OMSetRenderTargets(1, nullViews, nullptr);
-        }
-        if (g_mainRenderTargetView) {
-            g_mainRenderTargetView->Release();
-            g_mainRenderTargetView = nullptr;
-        }
-        g_TeleportCooldown = GetTickCount64() + 5000;
-        bTeleportPending = false;
-        bExecuteRPC = true;
-        std::cout << "[Jarvis] D3D Released. Handoff to Game Thread." << std::endl;
-    }
-
-    void ProcessQueue_GameThread() {
-        if (!bExecuteRPC) return;
-
-        SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
-        if (!IsValidObject(pLocal)) { bExecuteRPC = false; return; }
+    void TeleportTo(SDK::APalPlayerCharacter* pLocal, SDK::FVector Location)
+    {
+        if (!IsValidObject(pLocal)) return;
 
         SDK::APlayerController* PC = static_cast<SDK::APlayerController*>(pLocal->Controller);
-        if (!IsValidObject(PC) || !IsValidObject(PC->PlayerState)) { bExecuteRPC = false; return; }
+        if (!IsValidObject(PC) || !IsValidObject(PC->PlayerState)) return;
 
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(PC);
         SDK::APalPlayerState* PalState = static_cast<SDK::APalPlayerState*>(PC->PlayerState);
 
-        SDK::FVector SafeLoc = { TargetLocation.X, TargetLocation.Y, TargetLocation.Z + 100.0f };
+        if (!IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
+
+        // Coordinates
+        SDK::FVector SafeLoc = { Location.X, Location.Y, Location.Z + 100.0f };
         SDK::FQuat Rotation = { 0, 0, 0, 1 };
 
         struct {
@@ -74,12 +41,11 @@ namespace Teleporter
         RegisterParams.Location = SafeLoc;
         RegisterParams.Rotation = Rotation;
 
-        if (IsValidObject(PalPC->Transmitter) && IsValidObject(PalPC->Transmitter->Player)) {
-            CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
-            CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
-            std::cout << "[Jarvis] Teleport RPC Sent." << std::endl;
-        }
-        bExecuteRPC = false;
+        // Direct Execution (Safe now that RTV is released every frame)
+        CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
+        CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
+
+        std::cout << "[Jarvis] Teleport Executed." << std::endl;
     }
 
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName) {
@@ -95,10 +61,10 @@ namespace Teleporter
         if (index >= 0 && index < Waypoints.size()) Waypoints.erase(Waypoints.begin() + index);
     }
 
-    // [FIX] Scan for "BuildObjectBaseCamp" (Palbox) instead of just "BaseCampPoint"
-    void TeleportToHome(SDK::APalPlayerCharacter* pLocal) {
+    void TeleportToHome(SDK::APalPlayerCharacter* pLocal)
+    {
         if (!SDK::UObject::GObjects) return;
-        std::cout << "[Jarvis] Scanning for Base (Palbox)..." << std::endl;
+        std::cout << "[Jarvis] Scanning for Base..." << std::endl;
 
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
@@ -108,15 +74,15 @@ namespace Teleporter
                 std::string Name = Obj->GetName();
                 std::transform(Name.begin(), Name.end(), Name.begin(), ::tolower);
 
-                // Matches "PalBuildObjectBaseCampPoint" or derived classes
-                if (Name.find("buildobjectbasecamppoint") != std::string::npos) {
+                // Very broad search
+                if (Name.find("basecamp") != std::string::npos) {
                     SDK::AActor* Actor = static_cast<SDK::AActor*>(Obj);
                     SDK::FVector Loc = Actor->K2_GetActorLocation();
 
-                    // Filter invalid 0,0,0 coordinates
                     if (abs(Loc.X) > 1.0f || abs(Loc.Y) > 1.0f) {
-                        std::cout << "[Jarvis] Base Found: " << Name << std::endl;
-                        QueueTeleport(Loc);
+                        std::cout << "[Jarvis] Candidate: " << Name << std::endl;
+                        // Filter out non-physical points if needed, but for now try first valid loc
+                        TeleportTo(pLocal, Loc);
                         return;
                     }
                 }
@@ -125,7 +91,8 @@ namespace Teleporter
         std::cout << "[-] No Base Camp found." << std::endl;
     }
 
-    void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex) {
+    void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex)
+    {
         static const struct { const char* Name; SDK::FVector Loc; } Bosses[] = {
             { "Zoe & Grizzbolt", { 11200.0f, -43400.0f, 0.0f } },
             { "Lily & Lyleen",   { 18500.0f, 2800.0f, 0.0f } },
@@ -133,6 +100,6 @@ namespace Teleporter
             { "Marcus & Faleris", { 56100.0f, 33400.0f, 0.0f } },
             { "Victor & Shadowbeak", { -14900.0f, 44500.0f, 0.0f } }
         };
-        if (bossIndex >= 0 && bossIndex < 5) QueueTeleport(Bosses[bossIndex].Loc);
+        if (bossIndex >= 0 && bossIndex < 5) TeleportTo(pLocal, Bosses[bossIndex].Loc);
     }
 }

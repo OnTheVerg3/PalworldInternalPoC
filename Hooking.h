@@ -8,16 +8,12 @@
 #include "SDKGlobal.h"
 #include "VMTHook.h" 
 
-// --- GLOBAL BOUNDS ---
 extern uintptr_t g_GameBase;
 extern uintptr_t g_GameSize;
 
-// --- SHARED GLOBALS ---
 extern std::atomic<bool> g_bIsSafe;
 extern SDK::APalPlayerCharacter* g_pLocal;
-extern ULONGLONG g_TeleportCooldown;
 
-// --- MEMORY SAFETY ---
 inline bool IsSentinel(void* ptr) { return (uintptr_t)ptr == 0xFFFFFFFFFFFFFFFF; }
 inline bool IsGarbagePtr(void* ptr) {
     uintptr_t addr = (uintptr_t)ptr;
@@ -53,7 +49,5 @@ public:
     static void Shutdown();
     static void AttachPlayerHooks();
     static SDK::APalPlayerCharacter* GetLocalPlayerSafe();
-
-    // [NEW] Manual Player Selection
     static void SetManualPlayer(SDK::APalPlayerCharacter* pTarget);
 };

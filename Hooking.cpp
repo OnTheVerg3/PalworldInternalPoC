@@ -27,7 +27,7 @@ SDK::UObject* g_pController = nullptr;
 SDK::UObject* g_pParam = nullptr;
 std::atomic<bool> g_bIsSafe(false);
 std::atomic<bool> g_PendingExit(false);
-ULONGLONG g_TeleportCooldown = 0;
+
 bool g_ShowMenu = false;
 bool g_bHasAutoOpened = false;
 void* g_LastLocalPlayer = nullptr;
@@ -38,7 +38,6 @@ ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 HWND g_window = nullptr;
 
-// Manual Player Override
 SDK::APalPlayerCharacter* g_ManualPlayer = nullptr;
 
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
@@ -85,9 +84,7 @@ __declspec(noinline) void PerformWorldExit() {
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
-    g_TeleportCooldown = 0;
-    Teleporter::Reset();
-
+    // Release RTV just in case
     if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
 
     g_HookMutex.lock();
@@ -98,10 +95,7 @@ __declspec(noinline) void PerformWorldExit() {
     g_pController = nullptr;
     g_pParam = nullptr;
     g_LastLocalPlayer = nullptr;
-
-    // Clear manual player on full exit so we don't stick to a dead pointer
     g_ManualPlayer = nullptr;
-
     Features::Reset();
     Player::Reset();
     Menu::Reset();
@@ -112,37 +106,24 @@ __declspec(noinline) void PerformWorldExit() {
     std::cout << "[Jarvis] World Exit Clean." << std::endl;
 }
 
-// [FIX] Soft Transition for Player Switching
 void Hooking::SetManualPlayer(SDK::APalPlayerCharacter* pTarget) {
     if (!IsValidObject(pTarget)) return;
-
-    std::cout << "[Jarvis] Switching to Manual Player: " << pTarget->GetName() << std::endl;
+    std::cout << "[Jarvis] Manual Switch: " << pTarget->GetName() << std::endl;
 
     g_HookMutex.lock();
-
-    // 1. Restore old hooks (Unhook current)
+    // Unhook current
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
     g_ParamHook.Restore();
 
-    // 2. Clear current cache
+    // Set new target
     g_pLocal = nullptr;
-    g_pController = nullptr;
-    g_pParam = nullptr;
-    g_LastLocalPlayer = nullptr; // Force re-detection logic to run
-
-    // 3. Set the new manual target
+    g_LastLocalPlayer = nullptr; // Trigger re-hook logic next frame
     g_ManualPlayer = pTarget;
 
-    // 4. Reset features (state might be invalid for new player)
     Features::Reset();
     Player::Reset();
-
     g_HookMutex.unlock();
-
-    // Note: We DO NOT release D3D resources here.
-    // The next Present_Logic() call will see g_LastLocalPlayer is null, 
-    // pick up the new g_ManualPlayer, and attach hooks normally.
 }
 
 __declspec(noinline) void CheckForExit(SDK::UObject* pObject, const char* name) {
@@ -173,13 +154,8 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
 }
 
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
-    if (Features::bInfiniteDurability) {
-        if (RawStrContains(name, "UpdateDurability") || RawStrContains(name, "Deterioration") || RawStrContains(name, "Broken")) return true;
-    }
-    if (Features::bInfiniteAmmo) {
-        if (RawStrContains(name, "Consume") && RawStrContains(name, "Bullet")) return true;
-        if (RawStrContains(name, "Decrease") && RawStrContains(name, "Bullet")) return true;
-    }
+    if (Features::bInfiniteDurability && (RawStrContains(name, "Durability") || RawStrContains(name, "Deterioration"))) return true;
+    if (Features::bInfiniteAmmo && (RawStrContains(name, "Consume") || RawStrContains(name, "Decrease")) && RawStrContains(name, "Bullet")) return true;
     if (Features::bInfiniteMagazine && RawStrContains(name, "Reload")) return true;
     return false;
 }
@@ -193,10 +169,6 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
     __try {
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
-
-        if (g_bIsSafe) {
-            Teleporter::ProcessQueue_GameThread();
-        }
 
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
@@ -212,24 +184,13 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
 SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
     __try {
-        // [FIX] Priority: Manual Selection
-        if (g_ManualPlayer && IsValidObject(g_ManualPlayer)) {
-            return g_ManualPlayer;
-        }
-
-        // Default: Auto-Detect
+        if (g_ManualPlayer && IsValidObject(g_ManualPlayer)) return g_ManualPlayer;
         if (!SDK::pGWorld || !*SDK::pGWorld) return nullptr;
-        SDK::UWorld* pWorld = *SDK::pGWorld;
-        if (!IsValidObject(pWorld)) return nullptr;
-        SDK::UGameInstance* pGI = pWorld->OwningGameInstance;
+        SDK::UGameInstance* pGI = (*SDK::pGWorld)->OwningGameInstance;
         if (!IsValidObject(pGI) || pGI->LocalPlayers.Num() <= 0) return nullptr;
         SDK::ULocalPlayer* LP = pGI->LocalPlayers[0];
         if (!IsValidObject(LP) || !LP->PlayerController) return nullptr;
-        SDK::APlayerController* PC = LP->PlayerController;
-        if (!IsValidObject(PC)) return nullptr;
-        SDK::APawn* pPawn = PC->Pawn;
-        if (!IsValidObject(pPawn)) return nullptr;
-        return static_cast<SDK::APalPlayerCharacter*>(pPawn);
+        return static_cast<SDK::APalPlayerCharacter*>(LP->PlayerController->Pawn);
     }
     __except (1) { return nullptr; }
 }
@@ -238,17 +199,15 @@ void AttachPlayerHooks_Logic() {
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) return;
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] Attaching VMT Hooks to: " << pLocal->GetName() << std::endl;
+        std::cout << "[System] Hooking: " << pLocal->GetName() << std::endl;
         g_HookMutex.lock();
         Features::Reset(); Player::Reset();
         g_pLocal = pLocal;
         g_pController = pLocal->Controller;
         g_pParam = pLocal->CharacterParameterComponent;
-
         if (g_PawnHook.Init(pLocal)) g_PawnHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
         if (IsValidObject(g_pController) && g_ControllerHook.Init(g_pController)) g_ControllerHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
         if (IsValidObject(g_pParam) && g_ParamHook.Init(g_pParam)) g_ParamHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
-
         g_LastLocalPlayer = pLocal;
         g_HookMutex.unlock();
     }
@@ -274,12 +233,6 @@ void Present_Logic() {
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    if (Teleporter::bTeleportPending) {
-        Teleporter::ProcessQueue_RenderThread();
-        return oPresent(pSwapChain, SyncInterval, Flags);
-    }
-    if (GetTickCount64() < g_TeleportCooldown) return oPresent(pSwapChain, SyncInterval, Flags);
-
     static bool bInit = false;
     if (!bInit) {
         DXGI_SWAP_CHAIN_DESC sd; pSwapChain->GetDesc(&sd);
@@ -288,33 +241,42 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         ImGui::CreateContext(); ImGui_ImplWin32_Init(g_window); bInit = true;
     }
 
-    if (!g_mainRenderTargetView) {
-        ID3D11Texture2D* pBackBuffer;
-        pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice);
-        g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
-        pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
-        g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView);
-        pBackBuffer->Release();
-        ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dContext);
-    }
+    // [CRITICAL FIX] Create RTV
+    ID3D11Texture2D* pBackBuffer = nullptr;
+    pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice);
+    g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
+    pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
 
+    // If resource creation fails, skip frame
+    if (FAILED(g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView))) {
+        pBackBuffer->Release();
+        return oPresent(pSwapChain, SyncInterval, Flags);
+    }
+    pBackBuffer->Release();
+
+    // Logic
     __try { Present_Logic(); }
     __except (1) { g_bIsSafe = false; }
 
-    if (g_mainRenderTargetView) {
-        ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
-        g_HookMutex.lock();
-        if (g_bIsSafe) {
-            if (!g_bHasAutoOpened) { g_ShowMenu = true; g_bHasAutoOpened = true; }
-            if (g_ShowMenu) { ImGui::GetIO().MouseDrawCursor = true; Menu::Draw(); }
-            else ImGui::GetIO().MouseDrawCursor = false;
-        }
+    // Render
+    ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+    g_HookMutex.lock();
+    if (g_bIsSafe) {
+        if (!g_bHasAutoOpened) { g_ShowMenu = true; g_bHasAutoOpened = true; }
+        if (g_ShowMenu) { ImGui::GetIO().MouseDrawCursor = true; Menu::Draw(); }
         else ImGui::GetIO().MouseDrawCursor = false;
-        g_HookMutex.unlock();
-        ImGui::Render();
-        g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     }
+    g_HookMutex.unlock();
+    ImGui::Render();
+
+    // Bind, Draw, then RELEASE
+    g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    // [CRITICAL FIX] Release RTV immediately. We do NOT hold it across frames.
+    g_mainRenderTargetView->Release();
+    g_mainRenderTargetView = nullptr;
+
     return oPresent(pSwapChain, SyncInterval, Flags);
 }
 

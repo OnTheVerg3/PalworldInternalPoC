@@ -12,19 +12,15 @@ struct CustomWaypoint {
 namespace Teleporter
 {
     extern std::vector<CustomWaypoint> Waypoints;
-    extern bool bTeleportPending;
-    extern bool bExecuteRPC;
-    extern SDK::FVector TargetLocation;
 
-    void QueueTeleport(SDK::FVector Location);
-    void ProcessQueue_RenderThread();
-    void ProcessQueue_GameThread();
-
-    // [FIX] Reset flags on world exit
-    void Reset();
-
+    // Simplified Interface
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName);
     void DeleteWaypoint(int index);
+
+    // Direct Teleport Actions
+    void TeleportTo(SDK::APalPlayerCharacter* pLocal, SDK::FVector Location);
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal);
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex);
+
+    void Reset() {} // No state to reset now
 }

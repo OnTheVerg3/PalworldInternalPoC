@@ -9,7 +9,6 @@
 #include "imgui_style.h"
 
 static int selectedTab = 0;
-// [NEW] Local cache for player list
 static std::vector<Player::PlayerCandidate> g_PlayerList;
 static int g_SelectedPlayerIdx = -1;
 
@@ -38,14 +37,11 @@ void Menu::Draw() {
 
         switch (selectedTab) {
         case 0: // PLAYER
-            // [NEW] Player Selection UI
             ColoredSeparatorText("Target Selector", ImVec4(1, 0.5f, 0.0f, 1));
-
             if (ImGui::Button("Refresh Players", ImVec2(-1, 30))) {
                 g_PlayerList = Player::GetPlayerCandidates();
                 g_SelectedPlayerIdx = -1;
             }
-
             if (!g_PlayerList.empty()) {
                 std::string preview = (g_SelectedPlayerIdx >= 0) ? g_PlayerList[g_SelectedPlayerIdx].DisplayString : "Select Player...";
                 if (ImGui::BeginCombo("##PlayerSelect", preview.c_str())) {
@@ -53,7 +49,6 @@ void Menu::Draw() {
                         bool isSelected = (g_SelectedPlayerIdx == i);
                         if (ImGui::Selectable(g_PlayerList[i].DisplayString.c_str(), isSelected)) {
                             g_SelectedPlayerIdx = i;
-                            // Trigger Re-Hook Logic
                             Hooking::SetManualPlayer(g_PlayerList[i].Ptr);
                         }
                         if (isSelected) ImGui::SetItemDefaultFocus();
@@ -61,51 +56,37 @@ void Menu::Draw() {
                     ImGui::EndCombo();
                 }
             }
-            else {
-                ImGui::TextDisabled("No players found. Click Refresh.");
-            }
-            ImGui::Spacing();
-            ImGui::Separator();
-            ImGui::Spacing();
+            else ImGui::TextDisabled("No players found.");
 
-            ColoredSeparatorText("Character Stats", ImVec4(1, 1, 1, 1));
+            ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
+            ColoredSeparatorText("Stats & World", ImVec4(1, 1, 1, 1));
             ImGui::Checkbox("Infinite Stamina", &Features::bInfiniteStamina);
             ImGui::Spacing();
             ImGui::Checkbox("Attack Multiplier", &Player::bAttackMultiplier);
-            if (Player::bAttackMultiplier) {
-                ImGui::SameLine(); ImGui::SetNextItemWidth(150);
-                ImGui::SliderFloat("##AttackMod", &Player::fAttackModifier, 1.0f, 100.0f, "%.1fx");
-            }
+            if (Player::bAttackMultiplier) { ImGui::SameLine(); ImGui::SetNextItemWidth(150); ImGui::SliderFloat("##AttackMod", &Player::fAttackModifier, 1.0f, 100.0f, "%.1fx"); }
             ImGui::Checkbox("Weight Adjuster", &Player::bWeightAdjuster);
-            if (Player::bWeightAdjuster) {
-                ImGui::SameLine(); ImGui::SetNextItemWidth(150);
-                ImGui::InputFloat("##WeightMod", &Player::fWeightModifier, 1000.0f, 10000.0f, "%.0f");
-            }
+            if (Player::bWeightAdjuster) { ImGui::SameLine(); ImGui::SetNextItemWidth(150); ImGui::InputFloat("##WeightMod", &Player::fWeightModifier, 1000.0f, 10000.0f, "%.0f"); }
             ImGui::Spacing();
-            ColoredSeparatorText("World Interaction", ImVec4(0.3f, 1.0f, 0.3f, 1));
             if (ImGui::Button("Reveal Map", ImVec2(200, 30))) Player::bUnlockMap = true;
             if (ImGui::Button("Unlock Fast Travel", ImVec2(200, 30))) Player::bUnlockTowers = true;
             if (ImGui::Button("Vacuum Relics", ImVec2(200, 30))) Player::bCollectRelics = true;
             break;
 
         case 1: // WEAPONS
-            ColoredSeparatorText("Ammo Management", ImVec4(1, 1, 1, 1));
+            ColoredSeparatorText("Combat", ImVec4(1, 1, 1, 1));
             if (ImGui::Checkbox("Infinite Ammo", &Features::bInfiniteAmmo)) Features::bInfiniteMagazine = !Features::bInfiniteAmmo;
             if (ImGui::Checkbox("Infinite Mag", &Features::bInfiniteMagazine)) Features::bInfiniteAmmo = !Features::bInfiniteMagazine;
-            ImGui::Spacing();
-            ColoredSeparatorText("Properties", ImVec4(1, 1, 1, 1));
             ImGui::Checkbox("No Durability Loss", &Features::bInfiniteDurability);
             ImGui::Spacing();
-            ColoredSeparatorText("Damage", ImVec4(1, 0.3f, 0.3f, 1));
-            ImGui::Checkbox("Enable Damage Mod", &Features::bDamageHack);
-            if (Features::bDamageHack) ImGui::SliderInt("Multiplier", &Features::DamageMultiplier, 1, 100, "%dx");
+            ImGui::Checkbox("Damage Mod", &Features::bDamageHack);
+            if (Features::bDamageHack) { ImGui::SameLine(); ImGui::SliderInt("##DmgMult", &Features::DamageMultiplier, 1, 100, "%dx"); }
             break;
 
         case 2: // VISUALS
             ColoredSeparatorText("Camera", ImVec4(1, 1, 1, 1));
             if (ImGui::SliderFloat("FOV", &Visuals::fFOV, 60.0f, 140.0f, "%.0f")) Visuals::Apply();
-            if (ImGui::SliderFloat("Brightness", &Visuals::fGamma, 1.0f, 0.1f, "%.2f")) Visuals::Apply();
-            if (ImGui::Button("Reset", ImVec2(150, 30))) { Visuals::fFOV = 90.0f; Visuals::fGamma = 0.5f; Visuals::Apply(); }
+            if (ImGui::SliderFloat("Gamma (Left=Dark)", &Visuals::fGamma, 0.1f, 5.0f, "%.2f")) Visuals::Apply();
+            if (ImGui::Button("Reset", ImVec2(150, 30))) { Visuals::fFOV = 90.0f; Visuals::fGamma = 1.0f; Visuals::Apply(); }
             break;
 
         case 3: ItemSpawner::DrawTab(); break;
@@ -116,11 +97,11 @@ void Menu::Draw() {
             ColoredSeparatorText("Base & Bosses", ImVec4(0.3f, 1.0f, 0.3f, 1));
             if (ImGui::Button("TP to Base", ImVec2(-1, 30))) if (pLocal) Teleporter::TeleportToHome(pLocal);
 
-            if (ImGui::Button("Tower: Zoe & Grizzbolt")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 0);
-            if (ImGui::Button("Tower: Lily & Lyleen")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 1);
-            if (ImGui::Button("Tower: Axel & Orserk")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 2);
-            if (ImGui::Button("Tower: Marcus & Faleris")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 3);
-            if (ImGui::Button("Tower: Victor & Shadowbeak")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 4);
+            if (ImGui::Button("Zoe & Grizzbolt")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 0);
+            if (ImGui::Button("Lily & Lyleen")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 1);
+            if (ImGui::Button("Axel & Orserk")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 2);
+            if (ImGui::Button("Marcus & Faleris")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 3);
+            if (ImGui::Button("Victor & Shadowbeak")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 4);
 
             ImGui::Spacing();
             ColoredSeparatorText("Waypoints", ImVec4(0.3f, 1.0f, 1.0f, 1));
@@ -131,7 +112,8 @@ void Menu::Draw() {
             ImGui::Spacing();
             for (int i = 0; i < Teleporter::Waypoints.size(); ++i) {
                 ImGui::PushID(i);
-                if (ImGui::Button("TP")) if (pLocal) Teleporter::QueueTeleport(Teleporter::Waypoints[i].Location);
+                // [FIX] Direct call to TeleportTo
+                if (ImGui::Button("TP")) if (pLocal) Teleporter::TeleportTo(pLocal, Teleporter::Waypoints[i].Location);
                 ImGui::SameLine();
                 if (ImGui::Button("DEL")) Teleporter::DeleteWaypoint(i);
                 ImGui::SameLine();
@@ -143,7 +125,7 @@ void Menu::Draw() {
 
         case 5: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 3.5 (Jarvis)");
+            ImGui::Text("Version 3.6 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
             break;
         }
