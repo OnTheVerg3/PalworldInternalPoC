@@ -7,8 +7,7 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 #include "Player.h" 
-#include "Teleporter.h" 
-#include "Visuals.h"
+// [FIX] Removed Teleporter and Visuals includes
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -31,7 +30,6 @@ VMTHook g_PawnHook;
 VMTHook g_ControllerHook;
 VMTHook g_ParamHook;
 
-// Recursive Mutex
 std::recursive_mutex g_HookMutex;
 
 SDK::APalPlayerCharacter* g_pLocal = nullptr;
@@ -94,7 +92,10 @@ __declspec(noinline) void PerformWorldExit() {
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
-    // Do NOT release RTV here. hkResizeBuffers will handle it.
+    if (g_mainRenderTargetView) {
+        g_mainRenderTargetView->Release();
+        g_mainRenderTargetView = nullptr;
+    }
 
     g_HookMutex.lock();
     g_PawnHook.Restore();
@@ -108,7 +109,7 @@ __declspec(noinline) void PerformWorldExit() {
     Features::Reset();
     Player::Reset();
     Menu::Reset();
-    Teleporter::Reset();
+    // [FIX] Removed Teleporter::Reset()
     g_HookMutex.unlock();
 
     g_ShowMenu = false;
@@ -176,10 +177,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     __try {
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
 
-        // [FIX] Process Queue
-        if (g_bIsSafe) {
-            Teleporter::ProcessQueue();
-        }
+        // [FIX] Removed Teleporter Queue check
 
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
@@ -272,7 +270,6 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
-    // Cached RTV (No stutter)
     if (!g_mainRenderTargetView) {
         ID3D11Texture2D* pBackBuffer = nullptr;
         pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
@@ -314,13 +311,15 @@ void Hooking::Init() {
     ID3D11Device* dev; ID3D11DeviceContext* ctx; IDXGISwapChain* swap;
     if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, levels, 1, D3D11_SDK_VERSION, &scd, &swap, &dev, NULL, &ctx))) {
         DWORD_PTR* vtable = (DWORD_PTR*)swap; vtable = (DWORD_PTR*)vtable[0];
+
         void* presentAddr = (void*)vtable[8];
-        void* resizeAddr = (void*)vtable[13];
+        void* resizeAddr = (void*)vtable[13]; // Hook ResizeBuffers
+
         swap->Release(); dev->Release(); ctx->Release(); DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
         if (MH_Initialize() == MH_OK) {
             InitModuleBounds();
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
-            MH_CreateHook(resizeAddr, &hkResizeBuffers, (void**)&oResizeBuffers);
+            MH_CreateHook(resizeAddr, &hkResizeBuffers, (void**)&oResizeBuffers); // Apply Hook
             MH_EnableHook(MH_ALL_HOOKS);
         }
     }

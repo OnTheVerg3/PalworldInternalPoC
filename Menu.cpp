@@ -3,8 +3,6 @@
 #include "Hooking.h"
 #include "ItemSpawner.h"
 #include "Player.h"
-#include "Teleporter.h"
-#include "Visuals.h"
 #include "SDKGlobal.h"
 #include "imgui_style.h"
 
@@ -16,7 +14,9 @@ void Menu::InitTheme() { SetupImGuiStyle(); }
 void Menu::Reset() { selectedTab = 0; g_PlayerList.clear(); g_SelectedPlayerIdx = -1; }
 
 void Menu::Draw() {
-    const char* menuItems[] = { "Player", "Weapons", "Visuals", "Spawner", "Teleporter", "Settings" };
+    // [FIX] Removed Visuals and Teleporter from list
+    const char* menuItems[] = { "Player", "Weapons", "Spawner", "Settings" };
+
     ImGui::SetNextWindowSize(ImVec2(750, 500), ImGuiCond_FirstUseEver);
 
     if (ImGui::Begin("Palworld Internal [Aiden]", nullptr, ImGuiWindowFlags_NoCollapse)) {
@@ -82,49 +82,13 @@ void Menu::Draw() {
             if (Features::bDamageHack) { ImGui::SameLine(); ImGui::SliderInt("##DmgMult", &Features::DamageMultiplier, 1, 100, "%dx"); }
             break;
 
-        case 2: // VISUALS
-            ColoredSeparatorText("Camera", ImVec4(1, 1, 1, 1));
-            if (ImGui::SliderFloat("FOV", &Visuals::fFOV, 60.0f, 140.0f, "%.0f")) Visuals::Apply();
-            if (ImGui::SliderFloat("Gamma", &Visuals::fGamma, 0.1f, 5.0f, "%.2f")) Visuals::Apply();
-            if (ImGui::Button("Reset", ImVec2(150, 30))) { Visuals::fFOV = 90.0f; Visuals::fGamma = 1.0f; Visuals::Apply(); }
+        case 2: // SPAWNER (Re-indexed)
+            ItemSpawner::DrawTab();
             break;
 
-        case 3: ItemSpawner::DrawTab(); break;
-
-        case 4: // TELEPORTER
-        {
-            auto pLocal = Hooking::GetLocalPlayerSafe();
-            ColoredSeparatorText("Base & Bosses", ImVec4(0.3f, 1.0f, 0.3f, 1));
-            if (ImGui::Button("TP to Base", ImVec2(-1, 30))) if (pLocal) Teleporter::TeleportToHome(pLocal);
-
-            if (ImGui::Button("Zoe & Grizzbolt")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 0);
-            if (ImGui::Button("Lily & Lyleen")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 1);
-            if (ImGui::Button("Axel & Orserk")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 2);
-            if (ImGui::Button("Marcus & Faleris")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 3);
-            if (ImGui::Button("Victor & Shadowbeak")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 4);
-
-            ImGui::Spacing();
-            ColoredSeparatorText("Waypoints", ImVec4(0.3f, 1.0f, 1.0f, 1));
-            static char wpName[64] = "My Point";
-            ImGui::InputText("Name", wpName, 64);
-            if (ImGui::Button("Save Pos", ImVec2(-1, 30))) if (pLocal) Teleporter::AddWaypoint(pLocal, wpName);
-
-            ImGui::Spacing();
-            for (int i = 0; i < Teleporter::Waypoints.size(); ++i) {
-                ImGui::PushID(i);
-                if (ImGui::Button("TP")) if (pLocal) Teleporter::TeleportTo(pLocal, Teleporter::Waypoints[i].Location);
-                ImGui::SameLine();
-                if (ImGui::Button("DEL")) Teleporter::DeleteWaypoint(i);
-                ImGui::SameLine();
-                ImGui::Text("%s", Teleporter::Waypoints[i].Name.c_str());
-                ImGui::PopID();
-            }
-        }
-        break;
-
-        case 5: // SETTINGS
+        case 3: // SETTINGS (Re-indexed)
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 3.7 (Jarvis)");
+            ImGui::Text("Version 3.8 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
             break;
         }
