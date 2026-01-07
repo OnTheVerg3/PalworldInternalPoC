@@ -8,8 +8,7 @@
 
 namespace Player
 {
-    // ... (Variables and GetPlayerCandidates same as before) ...
-    // ... Keep GetPlayerCandidates implementation from previous response ...
+    // ... (Variables and GetPlayerCandidates same as previous) ...
     // Re-pasting standard variables for completeness:
     bool bAttackMultiplier = false;
     float fAttackModifier = 2.0f;
@@ -123,15 +122,24 @@ namespace Player
     {
         if (!SDK::UObject::GObjects) return;
         std::cout << "[Jarvis] Unlocking Fast Travel..." << std::endl;
+
+        SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
+        auto* NetworkPlayer = (PalPC && PalPC->Transmitter) ? PalPC->Transmitter->Player : nullptr;
+
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
 
-            // Matches cheat_state.cpp logic
             if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
                 auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
                 if (!FT->bUnlocked) {
+                    // Method 1: Local Interact (Works if authority/host)
                     FT->OnTriggerInteract(pLocal, SDK::EPalInteractiveObjectIndicatorType::UnlockFastTravel);
+
+                    // Method 2: RPC (Works if client)
+                    if (NetworkPlayer) {
+                        NetworkPlayer->RequestUnlockFastTravelPoint_ToServer(FT->FastTravelPointID);
+                    }
                 }
             }
         }

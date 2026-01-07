@@ -16,6 +16,7 @@
 extern std::vector<uintptr_t> g_PatternMatches;
 extern int g_CurrentMatchIndex;
 
+// --- HELPERS ---
 SDK::FString StdToFString(const std::string& str) {
     std::wstring wstr(str.begin(), str.end());
     return SDK::FString(wstr.c_str());
@@ -35,8 +36,12 @@ SDK::FGuid GenerateGuid() {
 SDK::UObject* FindRealInventoryData() {
     if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return nullptr;
 
-    SDK::UClass* TargetClass = SDK::UObject::FindObject<SDK::UClass>("Class Pal.PalPlayerInventoryData");
-    if (!TargetClass) TargetClass = SDK::UObject::FindObject<SDK::UClass>("PalPlayerInventoryData");
+    // Cache the class to speed up lookup
+    static SDK::UClass* TargetClass = nullptr;
+    if (!TargetClass) {
+        TargetClass = SDK::UObject::FindObject<SDK::UClass>("Class Pal.PalPlayerInventoryData");
+        if (!TargetClass) TargetClass = SDK::UObject::FindObject<SDK::UClass>("PalPlayerInventoryData");
+    }
     if (!TargetClass) return nullptr;
 
     for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
@@ -52,29 +57,45 @@ SDK::UObject* FindRealInventoryData() {
     return nullptr;
 }
 
-// [FIX] Robust Name Conversion
+// [FIX] Robust Library Finder (Scans GObjects if direct lookup fails)
 SDK::FName GetItemName(const char* ItemID) {
     static SDK::UKismetStringLibrary* Lib = nullptr;
 
-    // Try finding the library CDO if not cached
     if (!Lib) {
+        // 1. Try Direct Lookup
         Lib = static_cast<SDK::UKismetStringLibrary*>(SDK::UObject::FindObject("Default__KismetStringLibrary"));
-        if (!Lib) Lib = static_cast<SDK::UKismetStringLibrary*>(SDK::UObject::FindObject("KismetStringLibrary"));
+
+        // 2. If failed, Scan GObjects
+        if (!Lib && SDK::UObject::GObjects) {
+            for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
+                SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
+                if (!IsValidObject(Obj)) continue;
+
+                std::string name = Obj->GetName();
+                if (name.find("Default__KismetStringLibrary") != std::string::npos) {
+                    Lib = static_cast<SDK::UKismetStringLibrary*>(Obj);
+                    std::cout << "[Jarvis] Found StringLib: " << name << std::endl;
+                    break;
+                }
+            }
+        }
     }
 
     if (Lib) {
         return Lib->Conv_StringToName(StdToFString(ItemID));
     }
 
-    std::cout << "[-] Error: KismetStringLibrary not found! Spawner will fail." << std::endl;
+    std::cout << "[-] Critical: KismetStringLibrary NOT found." << std::endl;
     return SDK::FName();
 }
+
+// --- SPAWN METHODS ---
 
 void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) {
     if (!pInventory) return;
 
     SDK::FName ItemName = GetItemName(ItemID);
-    if (ItemName == SDK::FName()) return; // Name invalid
+    if (ItemName == SDK::FName()) return;
 
     auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fn) {
@@ -95,35 +116,34 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
     SDK::UPalPlayerInventoryData* InvData = static_cast<SDK::UPalPlayerInventoryData*>(pInventory);
     SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pController);
 
-    // 1. Get ID
     SDK::FName ItemName = GetItemName(ItemID);
     if (ItemName == SDK::FName()) return;
 
     // 2. Find Container & Slot
     SDK::UPalItemContainer* Container = nullptr;
     if (!InvData->TryGetContainerFromStaticItemID(ItemName, &Container) || !Container) {
-        std::cout << "[-] No Container for Item. (Inventory might be invalid or item is Key Item)" << std::endl;
+        std::cout << "[-] No Container for Item." << std::endl;
         return;
     }
 
     SDK::UPalItemSlot* Slot = nullptr;
     auto InvType = InvData->GetInventoryTypeFromStaticItemID(ItemName);
     if (!InvData->TryGetEmptySlot(InvType, &Slot) || !Slot) {
-        std::cout << "[-] Inventory Full. Cannot spawn." << std::endl;
+        std::cout << "[-] Inventory Full." << std::endl;
         return;
     }
 
-    // 3. Add Item (Server Side Attempt)
+    // 3. Add Item (Server)
     InvData->AddItem_ServerInternal(ItemName, Count, true, 0.0f);
 
-    // 4. Force Local (Client Side Override)
+    // 4. Force Local Update
     Slot->ItemId.StaticId = ItemName;
     Slot->StackCount = Count;
 
     static auto fnForceDirty = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalItemContainer.ForceMarkSlotDirty_ServerInternal");
     if (fnForceDirty) Container->ProcessEvent(fnForceDirty, nullptr);
 
-    // 5. The "Move" Exploit
+    // 5. The "Move" Exploit (Bypass Sync Check)
     if (IsValidObject(PalPC->Transmitter) && IsValidObject(PalPC->Transmitter->Item)) {
         SDK::FGuid RequestID = GenerateGuid();
         SDK::FPalItemSlotId SlotId = Slot->GetSlotId();
