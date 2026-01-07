@@ -7,7 +7,8 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 #include "Player.h" 
-#include "Teleporter.h" // [FIX] Added include
+#include "Teleporter.h" 
+#include "Visuals.h" // Added for Camera updates
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -33,8 +34,6 @@ SDK::UObject* g_pParam = nullptr;
 // Flags
 std::atomic<bool> g_bIsSafe(false);
 std::atomic<bool> g_PendingExit(false);
-
-ULONGLONG g_TeleportCooldown = 0;
 
 bool g_ShowMenu = false;
 bool g_bHasAutoOpened = false;
@@ -106,11 +105,6 @@ __declspec(noinline) void PerformWorldExit() {
     g_PendingExit = false;
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
-
-    if (g_mainRenderTargetView) {
-        g_mainRenderTargetView->Release();
-        g_mainRenderTargetView = nullptr;
-    }
 
     g_HookMutex.lock();
     g_PawnHook.Restore();
@@ -197,6 +191,13 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     __try {
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
 
+        // [FIX] Execute Queued Actions on Game Thread (Safe!)
+        // This solves the 80004004 Crash and RPC failures.
+        if (pObject == g_pLocal) {
+            Teleporter::ProcessQueue();
+            Visuals::Update();
+        }
+
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
         if (name[0] != '\0') {
@@ -273,17 +274,6 @@ void Present_Logic() {
 
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     if (g_GameBase == 0) InitModuleBounds();
-
-    // [FIX] Process Pending Teleport BEFORE rendering
-    // If a teleport executes, it returns early to skip the frame.
-    if (Teleporter::bTeleportPending) {
-        Teleporter::ProcessQueue();
-        return oPresent(pSwapChain, SyncInterval, Flags);
-    }
-
-    if (GetTickCount64() < g_TeleportCooldown) {
-        return oPresent(pSwapChain, SyncInterval, Flags);
-    }
 
     static bool bInputInitialized = false;
     if (!bInputInitialized) {

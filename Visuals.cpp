@@ -1,19 +1,34 @@
 #include "Visuals.h"
 #include "SDKGlobal.h"
+#include "Hooking.h"
 #include <string>
 
 namespace Visuals {
     float fFOV = 90.0f;
-    float fGamma = 0.5f; // Default for r.Color.Mid
+    float fGamma = 1.0f; // 1.0 is default/neutral here
 
     void Apply() {
-        // Set FOV
         std::string fovCmd = "fov " + std::to_string((int)fFOV);
         SDK::ExecuteConsoleCommand(fovCmd);
+    }
 
-        // Set Gamma (Brightness) using Midtones
-        // 0.5 is neutral. Higher = Brighter shadows.
-        std::string gammaCmd = "r.Color.Mid " + std::to_string(fGamma);
-        SDK::ExecuteConsoleCommand(gammaCmd);
+    void Update() {
+        // [FIX] Direct Camera Component Modification (Game Thread)
+        // This is how the provided 'cheat_state.cpp' did it.
+        SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
+        if (!SDK::IsValidObject(pLocal) || !SDK::IsValidObject(pLocal->FollowCamera)) return;
+
+        auto* Camera = pLocal->FollowCamera;
+
+        // FOV (Continuous enforcement)
+        Camera->WalkFOV = fFOV;
+        Camera->SprintFOV = fFOV;
+        Camera->AimFOV = fFOV;
+
+        // Brightness (AutoExposureBias)
+        // Enabled override and set value
+        Camera->PostProcessSettings.bOverride_AutoExposureBias = true;
+        Camera->PostProcessBlendWeight = 1.0f;
+        Camera->PostProcessSettings.AutoExposureBias = fGamma;
     }
 }
