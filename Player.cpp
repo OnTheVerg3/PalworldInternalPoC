@@ -93,10 +93,6 @@ namespace Player
                 if (bWeightAdjuster) {
                     inv->MaxInventoryWeight = fWeightModifier;
                 }
-                else {
-                    // [FIX] Reset to default if disabled
-                    if (inv->MaxInventoryWeight > 5000.0f) inv->MaxInventoryWeight = 500.0f;
-                }
             }
         }
     }
@@ -113,7 +109,7 @@ namespace Player
             GetNameSafe(Obj, nameBuf, sizeof(nameBuf));
             if (strstr(nameBuf, "PalGameSetting") && !strstr(nameBuf, "Default__")) {
                 SDK::UPalGameSetting* pSettings = static_cast<SDK::UPalGameSetting*>(Obj);
-                pSettings->worldmapUIMaskClearSize = 99999.0f; // Max out clear radius
+                pSettings->worldmapUIMaskClearSize = 99999.0f;
             }
         }
         std::cout << "[Jarvis] Map revealed." << std::endl;
@@ -133,6 +129,7 @@ namespace Player
 
             if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
                 auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
+                // [FIX] Only unlock if currently locked
                 if (!FT->bUnlocked) {
                     PalPC->Transmitter->Player->RequestUnlockFastTravelPoint_ToServer(FT->FastTravelPointID);
                 }
@@ -148,7 +145,6 @@ namespace Player
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
         if (!IsValidObject(PalPC) || !IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
-        // Build Cache
         if (g_RelicCache.empty()) {
             if (SDK::UObject::GObjects) {
                 for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
@@ -164,7 +160,6 @@ namespace Player
             if (g_RelicCache.empty()) { bCollectRelics = false; return; }
         }
 
-        // Collect One
         auto it = g_RelicCache.begin();
         if (it != g_RelicCache.end()) {
             SDK::APalLevelObjectObtainable* Relic = *it;

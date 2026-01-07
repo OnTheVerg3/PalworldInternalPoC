@@ -4,7 +4,7 @@
 #include <cstring>
 #include <string> 
 
-// [FIX] Need access to D3D resources to free them before loading screens
+// [FIX] Needed to release the D3D context before teleporting to prevent Error 80004004
 extern ID3D11RenderTargetView* g_mainRenderTargetView;
 
 namespace Teleporter
@@ -29,8 +29,9 @@ namespace Teleporter
 
         if (!IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
-        // [FIX] Release D3D Resources BEFORE teleporting.
-        // Teleporting causes a viewport reset. Holding this pointer causes the 80004004 crash.
+        // [FIX] Release D3D BackBuffer. 
+        // Teleporting triggers a loading screen/viewport reset. 
+        // If we hold this pointer, the engine crashes (80004004).
         if (g_mainRenderTargetView) {
             g_mainRenderTargetView->Release();
             g_mainRenderTargetView = nullptr;
@@ -69,11 +70,11 @@ namespace Teleporter
         if (index >= 0 && index < Waypoints.size()) Waypoints.erase(Waypoints.begin() + index);
     }
 
-    // [FIX] Fixed Logic: Find ANY Base Camp Point by name (works without SDK class definition)
+    // [FIX] Robust Base Finder (String Match)
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal)
     {
         if (!SDK::UObject::GObjects) return;
-        std::cout << "[Jarvis] Searching for Base Camp..." << std::endl;
+        std::cout << "[Jarvis] Scanning for Base Camp..." << std::endl;
 
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
@@ -81,11 +82,13 @@ namespace Teleporter
 
             if (Obj->IsA(SDK::AActor::StaticClass())) {
                 std::string ObjName = Obj->GetName();
-                // Check if name contains "BaseCampPoint" (Matches BP_PalBaseCampPoint, etc)
+
+                // Matches "BP_PalBaseCampPoint_C", "PalLevelObjectBaseCampPoint", etc.
                 if (ObjName.find("BaseCampPoint") != std::string::npos) {
                     SDK::AActor* BaseActor = static_cast<SDK::AActor*>(Obj);
                     SDK::FVector BaseLoc = BaseActor->K2_GetActorLocation();
 
+                    // Filter out 0,0,0 garbage
                     if (BaseLoc.X != 0.0f && BaseLoc.Y != 0.0f) {
                         std::cout << "[Jarvis] Found Base: " << ObjName << std::endl;
                         TeleportTo(pLocal, BaseLoc);

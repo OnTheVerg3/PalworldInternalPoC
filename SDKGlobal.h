@@ -99,7 +99,7 @@ namespace SDK {
         static UFunction* fn = nullptr;
         if (!fn) fn = UObject::FindObject<UFunction>("Function Engine.KismetSystemLibrary.ExecuteConsoleCommand");
 
-        // [FIX] Use FindObject to get the Default Object (CDO) reliably
+        // [FIX] Manually find the Default Object (CDO) since GetDefaultObj isn't available
         static UObject* defaultObj = nullptr;
         if (!defaultObj) defaultObj = UObject::FindObject<UObject>("Default__KismetSystemLibrary");
 
