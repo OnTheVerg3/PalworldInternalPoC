@@ -81,6 +81,11 @@ __declspec(noinline) void PerformWorldExit() {
     g_PendingExit = false;
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
+
+    // [FIX] Reset Teleporter state to prevent main menu stutters
+    g_TeleportCooldown = 0;
+    Teleporter::Reset();
+
     if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
     g_HookMutex.lock();
     g_PawnHook.Restore();
@@ -148,10 +153,11 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     __try {
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
 
-        if (pObject == g_pLocal) {
-            // [FIX] Process Teleport RPCs on Game Thread
-            Teleporter::ProcessQueue_GameThread();
-        }
+        // [FIX] Unconditionally process queue. Do not check if pObject == g_pLocal.
+        // We rely on IsValidObject(pLocal) inside ProcessQueue to ensure safety.
+        Teleporter::ProcessQueue_GameThread();
+
+        if (pObject == g_pLocal) Visuals::Update();
 
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
@@ -215,10 +221,9 @@ void Present_Logic() {
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // [FIX] Process Teleport Cleanup on Render Thread BEFORE drawing
     if (Teleporter::bTeleportPending) {
         Teleporter::ProcessQueue_RenderThread();
-        return oPresent(pSwapChain, SyncInterval, Flags); // Skip this frame
+        return oPresent(pSwapChain, SyncInterval, Flags);
     }
     if (GetTickCount64() < g_TeleportCooldown) return oPresent(pSwapChain, SyncInterval, Flags);
 

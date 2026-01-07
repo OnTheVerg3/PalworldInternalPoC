@@ -97,7 +97,6 @@ void Menu::Draw() {
             ImGui::Spacing();
             for (int i = 0; i < Teleporter::Waypoints.size(); ++i) {
                 ImGui::PushID(i);
-                // [FIX] Use QueueTeleport
                 if (ImGui::Button("TP")) if (pLocal) Teleporter::QueueTeleport(Teleporter::Waypoints[i].Location);
                 ImGui::SameLine();
                 if (ImGui::Button("DEL")) Teleporter::DeleteWaypoint(i);
@@ -110,7 +109,7 @@ void Menu::Draw() {
 
         case 5: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 3.3 (Jarvis)");
+            ImGui::Text("Version 3.4 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
             break;
         }
