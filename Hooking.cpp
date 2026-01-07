@@ -31,7 +31,7 @@ SDK::UObject* g_pParam = nullptr;
 
 // Flags
 std::atomic<bool> g_bIsSafe(false);
-std::atomic<bool> g_PendingExit(false); // [FIX] New flag to signal Render Thread
+std::atomic<bool> g_PendingExit(false);
 
 bool g_ShowMenu = false;
 bool g_bHasAutoOpened = false;
@@ -100,11 +100,18 @@ bool RawStrContains(const char* haystack, const char* needle) {
 // --- CLEANUP (RESTORE ORIGINAL STATE) ---
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
-    g_PendingExit = false; // Reset signal
+    g_PendingExit = false;
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
-    // We are on Render Thread, so we can safely lock without deadlocking Game Thread
+    // [CRITICAL FIX] Release D3D Resources to prevent 80004004 Crash
+    // The engine needs to resize/destroy the swapchain during level transition.
+    // If we hold this reference, the engine crashes.
+    if (g_mainRenderTargetView) {
+        g_mainRenderTargetView->Release();
+        g_mainRenderTargetView = nullptr;
+    }
+
     g_HookMutex.lock();
 
     // 1. Restore VTables
@@ -128,11 +135,10 @@ __declspec(noinline) void PerformWorldExit() {
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    std::cout << "[Jarvis] World Exit: Hooks Restored. State Cleared." << std::endl;
+    std::cout << "[Jarvis] World Exit: Cleanup Complete (D3D Released)." << std::endl;
 }
 
 // --- DETACH CHECKER ---
-// [FIX] Now only sets a flag. Does NOT lock mutex.
 __declspec(noinline) void CheckForExit(SDK::UObject* pObject, const char* name) {
     if (RawStrContains(name, "ReceiveDestroyed") ||
         RawStrContains(name, "ReceiveEndPlay") ||
@@ -142,7 +148,7 @@ __declspec(noinline) void CheckForExit(SDK::UObject* pObject, const char* name) 
         if (pObject == g_pLocal || pObject == g_pController) {
             if (!g_PendingExit) {
                 std::cout << "[Jarvis] Exit detected via: " << name << ". Scheduling Cleanup." << std::endl;
-                g_PendingExit = true; // Signal Render Thread to handle cleanup
+                g_PendingExit = true;
             }
         }
     }
@@ -154,14 +160,33 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         g_ShowMenu = !g_ShowMenu;
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
-            if (g_ShowMenu) ClipCursor(nullptr);
+            // [OPTIONAL] We could ClipCursor(NULL) here, but ImGui usually handles it.
         }
-        return 0;
     }
+
     if (g_ShowMenu && g_bIsSafe) {
-        if (g_pd3dDevice) ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
-        return 1;
+        if (g_pd3dDevice) {
+            ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
+        }
+
+        // [FIX] Selective Blocking.
+        // We ONLY return 1 (Block) for Mouse/Key messages.
+        // We MUST let Focus, Activate, Size, etc. pass through to the game.
+        switch (uMsg) {
+        case WM_MOUSEMOVE:
+        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
+        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
+        case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+        case WM_MOUSEWHEEL:
+        case WM_KEYDOWN: case WM_KEYUP:
+        case WM_SYSKEYDOWN: case WM_SYSKEYUP:
+        case WM_CHAR:
+            return 1; // Block input
+        }
+        // Let other messages pass (WM_SIZE, WM_ACTIVATE, etc.)
     }
+
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
@@ -195,10 +220,8 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
         if (name[0] != '\0') {
-            // [FIX] Just check for exit flag, don't run logic
             CheckForExit(pObject, name);
 
-            // If exit pending, pass through immediately
             if (g_PendingExit || !g_bIsSafe) {
                 return oFunc(pObject, pFunction, pParams);
             }
@@ -274,9 +297,8 @@ void AttachPlayerHooks_Logic() {
 }
 
 void Present_Logic() {
-    // [FIX] Check for pending exit signal from Game Thread
     if (g_PendingExit) {
-        PerformWorldExit(); // Execute cleanup on Render Thread (Safe!)
+        PerformWorldExit();
         return;
     }
 
