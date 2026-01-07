@@ -31,7 +31,7 @@ VMTHook g_PawnHook;
 VMTHook g_ControllerHook;
 VMTHook g_ParamHook;
 
-// Recursive Mutex (Fixes Manual Select Crash)
+// Recursive Mutex
 std::recursive_mutex g_HookMutex;
 
 SDK::APalPlayerCharacter* g_pLocal = nullptr;
@@ -94,7 +94,7 @@ __declspec(noinline) void PerformWorldExit() {
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
-    // Do NOT release RTV here. hkResizeBuffers will handle it safely.
+    // Do NOT release RTV here. hkResizeBuffers will handle it.
 
     g_HookMutex.lock();
     g_PawnHook.Restore();
@@ -176,7 +176,7 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     __try {
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
 
-        // [FIX] Execute Queue on Game Thread
+        // [FIX] Process Queue
         if (g_bIsSafe) {
             Teleporter::ProcessQueue();
         }
@@ -241,7 +241,6 @@ void Present_Logic() {
     g_HookMutex.unlock();
 }
 
-// [FIX] ResizeBuffers Hook to handle viewport changes safely
 HRESULT __stdcall hkResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
     if (g_mainRenderTargetView) {
         if (g_pd3dContext) g_pd3dContext->OMSetRenderTargets(0, 0, 0);
@@ -273,7 +272,7 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         }
     }
 
-    // [FIX] Create RTV only if missing (Cached strategy)
+    // Cached RTV (No stutter)
     if (!g_mainRenderTargetView) {
         ID3D11Texture2D* pBackBuffer = nullptr;
         pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
@@ -289,19 +288,17 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     __try { Present_Logic(); }
     __except (1) { g_bIsSafe = false; }
 
-    if (g_mainRenderTargetView) {
-        ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
-        g_HookMutex.lock();
-        if (g_bIsSafe) {
-            if (!g_bHasAutoOpened) { g_ShowMenu = true; g_bHasAutoOpened = true; }
-            if (g_ShowMenu) { ImGui::GetIO().MouseDrawCursor = true; Menu::Draw(); }
-            else ImGui::GetIO().MouseDrawCursor = false;
-        }
-        g_HookMutex.unlock();
-        ImGui::Render();
-        g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
-        ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+    g_HookMutex.lock();
+    if (g_bIsSafe) {
+        if (!g_bHasAutoOpened) { g_ShowMenu = true; g_bHasAutoOpened = true; }
+        if (g_ShowMenu) { ImGui::GetIO().MouseDrawCursor = true; Menu::Draw(); }
+        else ImGui::GetIO().MouseDrawCursor = false;
     }
+    g_HookMutex.unlock();
+    ImGui::Render();
+    g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
     return oPresent(pSwapChain, SyncInterval, Flags);
 }
@@ -317,15 +314,13 @@ void Hooking::Init() {
     ID3D11Device* dev; ID3D11DeviceContext* ctx; IDXGISwapChain* swap;
     if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, levels, 1, D3D11_SDK_VERSION, &scd, &swap, &dev, NULL, &ctx))) {
         DWORD_PTR* vtable = (DWORD_PTR*)swap; vtable = (DWORD_PTR*)vtable[0];
-
         void* presentAddr = (void*)vtable[8];
-        void* resizeAddr = (void*)vtable[13]; // Hook ResizeBuffers
-
+        void* resizeAddr = (void*)vtable[13];
         swap->Release(); dev->Release(); ctx->Release(); DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
         if (MH_Initialize() == MH_OK) {
             InitModuleBounds();
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
-            MH_CreateHook(resizeAddr, &hkResizeBuffers, (void**)&oResizeBuffers); // Apply Hook
+            MH_CreateHook(resizeAddr, &hkResizeBuffers, (void**)&oResizeBuffers);
             MH_EnableHook(MH_ALL_HOOKS);
         }
     }

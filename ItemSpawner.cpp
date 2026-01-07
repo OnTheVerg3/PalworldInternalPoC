@@ -16,7 +16,6 @@
 extern std::vector<uintptr_t> g_PatternMatches;
 extern int g_CurrentMatchIndex;
 
-// --- HELPERS ---
 SDK::FString StdToFString(const std::string& str) {
     std::wstring wstr(str.begin(), str.end());
     return SDK::FString(wstr.c_str());
@@ -56,24 +55,31 @@ SDK::UObject* FindRealInventoryData() {
 // [FIX] Robust Name Conversion
 SDK::FName GetItemName(const char* ItemID) {
     static SDK::UKismetStringLibrary* Lib = nullptr;
-    if (!Lib) Lib = static_cast<SDK::UKismetStringLibrary*>(SDK::UObject::FindObject("Default__KismetStringLibrary"));
+
+    // Try finding the library CDO if not cached
+    if (!Lib) {
+        Lib = static_cast<SDK::UKismetStringLibrary*>(SDK::UObject::FindObject("Default__KismetStringLibrary"));
+        if (!Lib) Lib = static_cast<SDK::UKismetStringLibrary*>(SDK::UObject::FindObject("KismetStringLibrary"));
+    }
 
     if (Lib) {
         return Lib->Conv_StringToName(StdToFString(ItemID));
     }
+
+    std::cout << "[-] Error: KismetStringLibrary not found! Spawner will fail." << std::endl;
     return SDK::FName();
 }
-
-// --- SPAWN METHODS ---
 
 void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) {
     if (!pInventory) return;
 
+    SDK::FName ItemName = GetItemName(ItemID);
+    if (ItemName == SDK::FName()) return; // Name invalid
+
     auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fn) {
         struct { SDK::FName ID; int32_t Num; bool bLog; float Dur; } params;
-
-        params.ID = GetItemName(ItemID);
+        params.ID = ItemName;
         params.Num = Count;
         params.bLog = true;
         params.Dur = 0.0f;
@@ -91,18 +97,19 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
 
     // 1. Get ID
     SDK::FName ItemName = GetItemName(ItemID);
+    if (ItemName == SDK::FName()) return;
 
     // 2. Find Container & Slot
     SDK::UPalItemContainer* Container = nullptr;
     if (!InvData->TryGetContainerFromStaticItemID(ItemName, &Container) || !Container) {
-        std::cout << "[-] No Container for Item." << std::endl;
+        std::cout << "[-] No Container for Item. (Inventory might be invalid or item is Key Item)" << std::endl;
         return;
     }
 
     SDK::UPalItemSlot* Slot = nullptr;
     auto InvType = InvData->GetInventoryTypeFromStaticItemID(ItemName);
     if (!InvData->TryGetEmptySlot(InvType, &Slot) || !Slot) {
-        std::cout << "[-] Inventory Full." << std::endl;
+        std::cout << "[-] Inventory Full. Cannot spawn." << std::endl;
         return;
     }
 
@@ -113,7 +120,6 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
     Slot->ItemId.StaticId = ItemName;
     Slot->StackCount = Count;
 
-    // Force Dirty via dynamic lookup
     static auto fnForceDirty = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalItemContainer.ForceMarkSlotDirty_ServerInternal");
     if (fnForceDirty) Container->ProcessEvent(fnForceDirty, nullptr);
 
@@ -125,7 +131,6 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
         SDK::TArray<SDK::FPalItemSlotIdAndNum> Froms;
         Froms.Add({ SlotId, Count });
 
-        // Request Move to Self
         PalPC->Transmitter->Item->RequestMove_ToServer(RequestID, SlotId, Froms);
         std::cout << "[Jarvis] MP Exploit Sent: " << ItemID << std::endl;
     }

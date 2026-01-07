@@ -19,18 +19,26 @@ namespace Teleporter
         if (fn) obj->ProcessEvent(fn, params);
     }
 
-    void TeleportTo(SDK::APalPlayerCharacter* pLocal, SDK::FVector Location)
-    {
+    // [FIX] UI calls this to safely queue the action
+    void QueueTeleport(SDK::FVector Location) {
         TargetLocation = Location;
         bTeleportPending = true;
         std::cout << "[Jarvis] Teleport Queued." << std::endl;
     }
 
-    void ProcessQueue()
-    {
+    // [FIX] Executed by Hooking.cpp on the Game Thread
+    void ProcessQueue() {
         if (!bTeleportPending) return;
 
+        // Execute the teleport
         SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
+        if (pLocal) TeleportTo(pLocal, TargetLocation);
+
+        bTeleportPending = false;
+    }
+
+    void TeleportTo(SDK::APalPlayerCharacter* pLocal, SDK::FVector Location)
+    {
         if (!IsValidObject(pLocal)) return;
 
         SDK::APlayerController* PC = static_cast<SDK::APlayerController*>(pLocal->Controller);
@@ -39,7 +47,9 @@ namespace Teleporter
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(PC);
         SDK::APalPlayerState* PalState = static_cast<SDK::APalPlayerState*>(PC->PlayerState);
 
-        SDK::FVector SafeLoc = { TargetLocation.X, TargetLocation.Y, TargetLocation.Z + 100.0f };
+        if (!IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
+
+        SDK::FVector SafeLoc = { Location.X, Location.Y, Location.Z + 100.0f };
         SDK::FQuat Rotation = { 0, 0, 0, 1 };
 
         struct {
@@ -55,8 +65,7 @@ namespace Teleporter
         CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
         CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
 
-        std::cout << "[Jarvis] Teleport Executed (Game Thread)." << std::endl;
-        bTeleportPending = false;
+        std::cout << "[Jarvis] Teleport Executed." << std::endl;
     }
 
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName) {
@@ -91,7 +100,7 @@ namespace Teleporter
 
                     if (abs(Loc.X) > 1.0f) {
                         std::cout << "[Jarvis] Valid Base Found: " << Name << std::endl;
-                        TeleportTo(pLocal, Loc);
+                        QueueTeleport(Loc);
                         return;
                     }
                 }
@@ -109,6 +118,6 @@ namespace Teleporter
             { "Marcus & Faleris", { 56100.0f, 33400.0f, 0.0f } },
             { "Victor & Shadowbeak", { -14900.0f, 44500.0f, 0.0f } }
         };
-        if (bossIndex >= 0 && bossIndex < 5) TeleportTo(pLocal, Bosses[bossIndex].Loc);
+        if (bossIndex >= 0 && bossIndex < 5) QueueTeleport(Bosses[bossIndex].Loc);
     }
 }
