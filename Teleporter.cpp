@@ -9,6 +9,11 @@ namespace Teleporter
 {
     std::vector<CustomWaypoint> Waypoints;
 
+    // [FIX] Implementation moved here
+    void Reset() {
+        // No internal state to clear for now, but function must exist for Linker
+    }
+
     void CallFn(SDK::UObject* obj, const char* fnName, void* params = nullptr) {
         if (!IsValidObject(obj)) return;
         auto fn = SDK::UObject::FindObject<SDK::UFunction>(fnName);
@@ -41,7 +46,7 @@ namespace Teleporter
         RegisterParams.Location = SafeLoc;
         RegisterParams.Rotation = Rotation;
 
-        // Direct Execution (Safe now that RTV is released every frame)
+        // Direct Execution (Safe due to RTV release in Hooking.cpp)
         CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
         CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
 
@@ -66,6 +71,9 @@ namespace Teleporter
         if (!SDK::UObject::GObjects) return;
         std::cout << "[Jarvis] Scanning for Base..." << std::endl;
 
+        bool bFound = false;
+
+        // [FIX] Broader search
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
@@ -74,21 +82,25 @@ namespace Teleporter
                 std::string Name = Obj->GetName();
                 std::transform(Name.begin(), Name.end(), Name.begin(), ::tolower);
 
-                // Very broad search
-                if (Name.find("basecamp") != std::string::npos) {
+                // If it contains "base" and "camp", it's likely a base point
+                if (Name.find("base") != std::string::npos && Name.find("camp") != std::string::npos) {
+
+                    // Filter out UI or logical controllers
+                    if (Name.find("ui") != std::string::npos || Name.find("controller") != std::string::npos) continue;
+
                     SDK::AActor* Actor = static_cast<SDK::AActor*>(Obj);
                     SDK::FVector Loc = Actor->K2_GetActorLocation();
 
                     if (abs(Loc.X) > 1.0f || abs(Loc.Y) > 1.0f) {
-                        std::cout << "[Jarvis] Candidate: " << Name << std::endl;
-                        // Filter out non-physical points if needed, but for now try first valid loc
+                        std::cout << "[Jarvis] Teleporting to: " << Obj->GetName() << std::endl;
                         TeleportTo(pLocal, Loc);
-                        return;
+                        bFound = true;
+                        return; // Stop at first valid base
                     }
                 }
             }
         }
-        std::cout << "[-] No Base Camp found." << std::endl;
+        if (!bFound) std::cout << "[-] No Base Camp found." << std::endl;
     }
 
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex)

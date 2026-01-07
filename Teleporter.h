@@ -22,5 +22,6 @@ namespace Teleporter
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal);
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex);
 
-    void Reset() {} // No state to reset now
+    // [FIX] Declaration only. Implementation moved to .cpp to fix LNK2005.
+    void Reset();
 }

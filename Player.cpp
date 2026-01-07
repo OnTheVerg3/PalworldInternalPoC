@@ -8,6 +8,9 @@
 
 namespace Player
 {
+    // ... (Variables and GetPlayerCandidates same as before) ...
+    // ... Keep GetPlayerCandidates implementation from previous response ...
+    // Re-pasting standard variables for completeness:
     bool bAttackMultiplier = false;
     float fAttackModifier = 2.0f;
     bool bWeightAdjuster = false;
@@ -21,36 +24,26 @@ namespace Player
     const ULONGLONG COLLECTION_INTERVAL_MS = 250;
     std::unordered_map<std::string, SDK::UFunction*> g_PlayerFuncCache;
 
-    // [NEW] Implementation of Player Scanner
     std::vector<PlayerCandidate> GetPlayerCandidates() {
         std::vector<PlayerCandidate> results;
         if (!SDK::UObject::GObjects) return results;
-
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
-
-            // Check if it's a PalPlayerCharacter
             if (Obj->IsA(SDK::APalPlayerCharacter::StaticClass())) {
                 SDK::APalPlayerCharacter* Char = static_cast<SDK::APalPlayerCharacter*>(Obj);
-
-                // Ensure it has a controller (valid player)
                 if (IsValidObject(Char->Controller)) {
                     SDK::AController* PC = Char->Controller;
-                    std::string controllerName = PC->GetName();
-                    std::string displayName = "Unknown";
-
-                    // Try to get PlayerState Name
+                    std::string cName = PC->GetName();
+                    std::string dName = "Unknown";
                     if (IsValidObject(PC->PlayerState)) {
-                        SDK::FString fName = PC->PlayerState->PlayerNamePrivate; // Or PlayerName depending on SDK
+                        SDK::FString fName = PC->PlayerState->PlayerNamePrivate;
                         if (fName.IsValid()) {
-                            std::wstring wName = fName.ToWString();
-                            displayName = std::string(wName.begin(), wName.end());
+                            std::wstring w = fName.ToWString();
+                            dName = std::string(w.begin(), w.end());
                         }
                     }
-
-                    std::string entry = controllerName + " - " + displayName;
-                    results.push_back({ Char, entry });
+                    results.push_back({ Char, cName + " - " + dName });
                 }
             }
         }
@@ -80,26 +73,15 @@ namespace Player
         g_RelicCache.clear();
         g_PlayerFuncCache.clear();
         bCollectRelics = false;
-        std::cout << "[Player] Cache cleared." << std::endl;
     }
 
     void Update(SDK::APalPlayerCharacter* pLocal)
     {
         if (!g_bIsSafe || !IsValidObject(pLocal)) return;
-
         __try {
             ProcessAttributes(pLocal);
-
-            if (bUnlockMap) {
-                UnlockAllMap(pLocal);
-                bUnlockMap = false;
-            }
-
-            if (bUnlockTowers) {
-                UnlockAllTowers(pLocal);
-                bUnlockTowers = false;
-            }
-
+            if (bUnlockMap) { UnlockAllMap(pLocal); bUnlockMap = false; }
+            if (bUnlockTowers) { UnlockAllTowers(pLocal); bUnlockTowers = false; }
             if (bCollectRelics) TeleportRelicsToPlayer(pLocal);
             else if (!g_RelicCache.empty()) g_RelicCache.clear();
         }
@@ -111,7 +93,6 @@ namespace Player
         if (bAttackMultiplier && IsValidObject(pLocal->CharacterParameterComponent)) {
             pLocal->CharacterParameterComponent->AttackUp = (int32_t)(50 * fAttackModifier);
         }
-
         SDK::APlayerController* PC = static_cast<SDK::APlayerController*>(pLocal->Controller);
         if (IsValidObject(PC) && IsValidObject(PC->PlayerState)) {
             SDK::APalPlayerState* pState = static_cast<SDK::APalPlayerState*>(PC->PlayerState);
@@ -124,12 +105,10 @@ namespace Player
 
     void UnlockAllMap(SDK::APalPlayerCharacter* pLocal)
     {
-        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
-
+        if (!SDK::UObject::GObjects) return;
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
-
             char nameBuf[256];
             GetNameSafe(Obj, nameBuf, sizeof(nameBuf));
             if (strstr(nameBuf, "PalGameSetting") && !strstr(nameBuf, "Default__")) {
@@ -144,11 +123,11 @@ namespace Player
     {
         if (!SDK::UObject::GObjects) return;
         std::cout << "[Jarvis] Unlocking Fast Travel..." << std::endl;
-
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
 
+            // Matches cheat_state.cpp logic
             if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
                 auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
                 if (!FT->bUnlocked) {
@@ -162,7 +141,6 @@ namespace Player
     {
         ULONGLONG CurrentTime = GetTickCount64();
         if (CurrentTime - g_LastCollectTime < COLLECTION_INTERVAL_MS) return;
-
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
         if (!IsValidObject(PalPC) || !IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
@@ -171,7 +149,6 @@ namespace Player
                 for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
                     SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
                     if (!IsValidObject(Obj)) continue;
-
                     if (IsClass(Obj, "PalLevelObjectRelic")) {
                         SDK::APalLevelObjectObtainable* Relic = static_cast<SDK::APalLevelObjectObtainable*>(Obj);
                         if (!Relic->bPickedInClient) g_RelicCache.push_back(Relic);

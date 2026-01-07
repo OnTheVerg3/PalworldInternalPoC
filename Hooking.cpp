@@ -84,8 +84,11 @@ __declspec(noinline) void PerformWorldExit() {
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
-    // Release RTV just in case
-    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
+    // Release RTV
+    if (g_mainRenderTargetView) {
+        g_mainRenderTargetView->Release();
+        g_mainRenderTargetView = nullptr;
+    }
 
     g_HookMutex.lock();
     g_PawnHook.Restore();
@@ -99,6 +102,7 @@ __declspec(noinline) void PerformWorldExit() {
     Features::Reset();
     Player::Reset();
     Menu::Reset();
+    Teleporter::Reset();
     g_HookMutex.unlock();
 
     g_ShowMenu = false;
@@ -241,24 +245,23 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
         ImGui::CreateContext(); ImGui_ImplWin32_Init(g_window); bInit = true;
     }
 
-    // [CRITICAL FIX] Create RTV
+    // 1. Create RTV
     ID3D11Texture2D* pBackBuffer = nullptr;
     pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice);
     g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
     pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
 
-    // If resource creation fails, skip frame
     if (FAILED(g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView))) {
         pBackBuffer->Release();
         return oPresent(pSwapChain, SyncInterval, Flags);
     }
     pBackBuffer->Release();
 
-    // Logic
+    // 2. Logic
     __try { Present_Logic(); }
     __except (1) { g_bIsSafe = false; }
 
-    // Render
+    // 3. Render
     ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
     g_HookMutex.lock();
     if (g_bIsSafe) {
@@ -269,11 +272,13 @@ HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
     g_HookMutex.unlock();
     ImGui::Render();
 
-    // Bind, Draw, then RELEASE
+    // 4. Bind & Draw
     g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-    // [CRITICAL FIX] Release RTV immediately. We do NOT hold it across frames.
+    // 5. [CRITICAL] Unbind & Release RTV immediately
+    ID3D11RenderTargetView* nullViews[] = { nullptr };
+    g_pd3dContext->OMSetRenderTargets(1, nullViews, nullptr);
     g_mainRenderTargetView->Release();
     g_mainRenderTargetView = nullptr;
 
