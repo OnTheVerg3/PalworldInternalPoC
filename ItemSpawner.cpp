@@ -10,6 +10,9 @@
 #include <vector>
 #include <random> 
 
+// Include Engine classes for KismetStringLibrary
+#include "SDK/Engine_classes.hpp"
+
 extern std::vector<uintptr_t> g_PatternMatches;
 extern int g_CurrentMatchIndex;
 
@@ -50,33 +53,33 @@ SDK::UObject* FindRealInventoryData() {
     return nullptr;
 }
 
+// [FIX] Robust Name Conversion
+SDK::FName GetItemName(const char* ItemID) {
+    static SDK::UKismetStringLibrary* Lib = nullptr;
+    if (!Lib) Lib = static_cast<SDK::UKismetStringLibrary*>(SDK::UObject::FindObject("Default__KismetStringLibrary"));
+
+    if (Lib) {
+        return Lib->Conv_StringToName(StdToFString(ItemID));
+    }
+    return SDK::FName();
+}
+
 // --- SPAWN METHODS ---
 
 void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) {
     if (!pInventory) return;
+
     auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fn) {
         struct { SDK::FName ID; int32_t Num; bool bLog; float Dur; } params;
 
-        static SDK::UObject* lib = SDK::UObject::FindObject<SDK::UObject>("Default__KismetStringLibrary");
-        static SDK::UFunction* convFn = SDK::UObject::FindObject<SDK::UFunction>("Function Engine.KismetStringLibrary.Conv_StringToName");
-
-        if (lib && convFn) {
-            struct { SDK::FString S; SDK::FName R; } cParams;
-            cParams.S = StdToFString(ItemID);
-            lib->ProcessEvent(convFn, &cParams);
-            params.ID = cParams.R;
-        }
-        else {
-            return;
-        }
-
+        params.ID = GetItemName(ItemID);
         params.Num = Count;
         params.bLog = true;
         params.Dur = 0.0f;
 
         pInventory->ProcessEvent(fn, &params);
-        std::cout << "[Jarvis] Spawn Method 1 Executed." << std::endl;
+        std::cout << "[Jarvis] Spawn Method 1: " << ItemID << std::endl;
     }
 }
 
@@ -86,48 +89,33 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
     SDK::UPalPlayerInventoryData* InvData = static_cast<SDK::UPalPlayerInventoryData*>(pInventory);
     SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pController);
 
-    // 1. Get Item Name
-    SDK::FName ItemName;
-    static SDK::UObject* lib = SDK::UObject::FindObject<SDK::UObject>("Default__KismetStringLibrary");
-    static SDK::UFunction* convFn = SDK::UObject::FindObject<SDK::UFunction>("Function Engine.KismetStringLibrary.Conv_StringToName");
-    if (lib && convFn) {
-        struct { SDK::FString S; SDK::FName R; } cParams;
-        cParams.S = StdToFString(ItemID);
-        lib->ProcessEvent(convFn, &cParams);
-        ItemName = cParams.R;
-    }
-    else return;
+    // 1. Get ID
+    SDK::FName ItemName = GetItemName(ItemID);
 
     // 2. Find Container & Slot
     SDK::UPalItemContainer* Container = nullptr;
     if (!InvData->TryGetContainerFromStaticItemID(ItemName, &Container) || !Container) {
-        std::cout << "[-] Failed to get container." << std::endl;
+        std::cout << "[-] No Container for Item." << std::endl;
         return;
     }
 
     SDK::UPalItemSlot* Slot = nullptr;
     auto InvType = InvData->GetInventoryTypeFromStaticItemID(ItemName);
     if (!InvData->TryGetEmptySlot(InvType, &Slot) || !Slot) {
-        std::cout << "[-] Inventory Full (No Empty Slot)." << std::endl;
+        std::cout << "[-] Inventory Full." << std::endl;
         return;
     }
 
-    // 3. Add Item Internal (Server)
+    // 3. Add Item (Server Side Attempt)
     InvData->AddItem_ServerInternal(ItemName, Count, true, 0.0f);
 
-    // 4. Force Local Update (Critical for Sync)
+    // 4. Force Local (Client Side Override)
     Slot->ItemId.StaticId = ItemName;
     Slot->StackCount = Count;
 
-    // [FIX] Use ProcessEvent because ForceMarkSlotDirty_ServerInternal is missing from SDK header
+    // Force Dirty via dynamic lookup
     static auto fnForceDirty = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalItemContainer.ForceMarkSlotDirty_ServerInternal");
-    if (fnForceDirty) {
-        Container->ProcessEvent(fnForceDirty, nullptr);
-    }
-    else {
-        // Fallback or log if function not found (unlikely)
-        std::cout << "[-] ForceMarkSlotDirty_ServerInternal not found via FindObject." << std::endl;
-    }
+    if (fnForceDirty) Container->ProcessEvent(fnForceDirty, nullptr);
 
     // 5. The "Move" Exploit
     if (IsValidObject(PalPC->Transmitter) && IsValidObject(PalPC->Transmitter->Item)) {
@@ -137,11 +125,11 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
         SDK::TArray<SDK::FPalItemSlotIdAndNum> Froms;
         Froms.Add({ SlotId, Count });
 
+        // Request Move to Self
         PalPC->Transmitter->Item->RequestMove_ToServer(RequestID, SlotId, Froms);
-        std::cout << "[Jarvis] Sync Request Sent (MP Exploit)." << std::endl;
+        std::cout << "[Jarvis] MP Exploit Sent: " << ItemID << std::endl;
     }
 
-    // 6. Mark All Dirty
     InvData->RequestForceMarkAllDirty_ToServer(true);
 }
 
