@@ -10,7 +10,7 @@
 #include <vector>
 #include <random> 
 
-// Engine classes
+// Include Engine classes for KismetStringLibrary
 #include "SDK/Engine_classes.hpp"
 
 extern std::vector<uintptr_t> g_PatternMatches;
@@ -33,29 +33,12 @@ SDK::FGuid GenerateGuid() {
     return guid;
 }
 
-// [FIX] Robust Name Creation without crashing
-SDK::FName MakeName(const char* NameStr) {
-    static SDK::UKismetStringLibrary* Lib = nullptr;
-    if (!Lib) {
-        Lib = static_cast<SDK::UKismetStringLibrary*>(SDK::UObject::FindObject("Default__KismetStringLibrary"));
-        if (!Lib) Lib = static_cast<SDK::UKismetStringLibrary*>(SDK::UObject::FindObject("KismetStringLibrary"));
-    }
-
-    if (Lib) return Lib->Conv_StringToName(StdToFString(NameStr));
-
-    // Fallback: This is risky but better than nothing if lib is missing
-    // Ideally, we shouldn't reach here.
-    std::cout << "[-] StringLib Missing. Cannot create FName for: " << NameStr << std::endl;
-    return SDK::FName();
-}
-
 SDK::UObject* FindRealInventoryData() {
     if (!SDK::UObject::GObjects) return nullptr;
 
-    // Cache Class
+    // Cache Class to avoid repetitive lookups
     static SDK::UClass* TargetClass = nullptr;
     if (!TargetClass) TargetClass = SDK::UObject::FindObject<SDK::UClass>("Class Pal.PalPlayerInventoryData");
-
     if (!TargetClass) return nullptr;
 
     for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
@@ -63,12 +46,41 @@ SDK::UObject* FindRealInventoryData() {
         if (!IsValidObject(Obj)) continue;
 
         if (Obj->IsA(TargetClass)) {
-            // Filter out CDO
-            if (Obj->GetName().find("Default__") != std::string::npos) continue;
+            std::string name = Obj->GetName();
+            // Exclude Class Default Objects (CDO)
+            if (name.find("Default__") != std::string::npos) continue;
             return Obj;
         }
     }
     return nullptr;
+}
+
+// [FIX] Brute-force finder for String Library
+SDK::FName GetItemName(const char* ItemID) {
+    static SDK::UKismetStringLibrary* Lib = nullptr;
+
+    if (!Lib && SDK::UObject::GObjects) {
+        // Scan ALL objects to find the library instance
+        for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
+            SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
+            if (!IsValidObject(Obj)) continue;
+
+            std::string name = Obj->GetName();
+            // Look for the default object
+            if (name.find("KismetStringLibrary") != std::string::npos && name.find("Default__") != std::string::npos) {
+                Lib = static_cast<SDK::UKismetStringLibrary*>(Obj);
+                std::cout << "[Jarvis] Found StringLib: " << name << std::endl;
+                break;
+            }
+        }
+    }
+
+    if (Lib) {
+        return Lib->Conv_StringToName(StdToFString(ItemID));
+    }
+
+    std::cout << "[-] Critical: KismetStringLibrary NOT found in GObjects." << std::endl;
+    return SDK::FName();
 }
 
 // --- SPAWN METHODS ---
@@ -76,9 +88,9 @@ SDK::UObject* FindRealInventoryData() {
 void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) {
     if (!pInventory) return;
 
-    SDK::FName ItemName = MakeName(ItemID);
-    // SDK::FName comparison operators might not be defined, check index if possible
-    // Assuming 0 index is None.
+    SDK::FName ItemName = GetItemName(ItemID);
+    // Basic check for None (0) or invalid
+    if (ItemName.Index == 0) return;
 
     auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fn) {
@@ -99,18 +111,22 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
     SDK::UPalPlayerInventoryData* InvData = static_cast<SDK::UPalPlayerInventoryData*>(pInventory);
     SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pController);
 
-    SDK::FName ItemName = MakeName(ItemID);
+    // 1. Get ID
+    SDK::FName ItemName = GetItemName(ItemID);
+    if (ItemName.Index == 0) {
+        std::cout << "[-] Name conversion failed for: " << ItemID << std::endl;
+        return;
+    }
 
     // 2. Find Container & Slot
     SDK::UPalItemContainer* Container = nullptr;
 
     // Try getting container normally
     if (!InvData->TryGetContainerFromStaticItemID(ItemName, &Container) || !Container) {
-        // [FIX] Fallback: Grab the first valid container (usually essential/common)
-        // This bypasses strict type checking which fails for modded/debug items
-        // Note: This requires accessing the InventoryMultiHelper or similar, but for now 
-        // we will rely on the user having space in the correct tab.
-        std::cout << "[-] Could not auto-resolve container. Item might be invalid category." << std::endl;
+        std::cout << "[-] Auto-container failed. Attempting fallback..." << std::endl;
+        // Fallback: We can't easily iterate containers without SDK support for InventoryMultiHelper.
+        // But usually, items go to the first container (Common) or we abort.
+        // For now, we abort to prevent crashing, but log it clearly.
         return;
     }
 
@@ -121,6 +137,8 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
         std::cout << "[-] Inventory Full or Type Mismatch." << std::endl;
         return;
     }
+
+    std::cout << "[Jarvis] Slot Found. Injecting item..." << std::endl;
 
     // 3. Add Item (Server Attempt)
     InvData->AddItem_ServerInternal(ItemName, Count, true, 0.0f);
@@ -162,20 +180,21 @@ void ItemSpawner::DrawTab() {
 
     ImGui::Spacing();
 
-    // ... (UI Layout Code Remains Identical to save space, logic is in functions above) ... 
-
-    // Copy-paste the Grid/List logic here if you need full file, 
-    // otherwise I will just show the button logic which calls the new functions.
-
+    // Search Logic
     if (strlen(searchBuffer) > 0) {
-        // ... Search Logic ...
         ImGui::BeginChild("SearchResults", ImVec2(0, -60), true);
         std::string filter = searchBuffer;
         for (const auto& cat : Database::Categories) {
             for (const auto& item : cat.Items) {
                 std::string itemName = item.Name;
                 if (itemName.length() == 0) continue;
-                auto it = std::search(itemName.begin(), itemName.end(), filter.begin(), filter.end(), [](char ch1, char ch2) { return std::toupper(ch1) == std::toupper(ch2); });
+
+                auto it = std::search(
+                    itemName.begin(), itemName.end(),
+                    filter.begin(), filter.end(),
+                    [](char ch1, char ch2) { return std::toupper(ch1) == std::toupper(ch2); }
+                );
+
                 if (it != itemName.end()) {
                     if (ImGui::Selectable(item.Name)) strcpy_s(manualIdBuffer, item.ID);
                 }
@@ -184,12 +203,15 @@ void ItemSpawner::DrawTab() {
         ImGui::EndChild();
     }
     else {
-        // ... Category/Item Logic ...
+        // Categories Logic
         ImGui::Columns(2, "SpawnerColumns", true);
         ImGui::SetColumnWidth(0, 160.0f);
         ImGui::BeginChild("Categories", ImVec2(0, -60));
         for (int i = 0; i < Database::Categories.size(); i++) {
-            if (ImGui::Selectable(Database::Categories[i].Name, selectedCategoryIdx == i)) { selectedCategoryIdx = i; selectedItemIdx = -1; }
+            if (ImGui::Selectable(Database::Categories[i].Name, selectedCategoryIdx == i)) {
+                selectedCategoryIdx = i;
+                selectedItemIdx = -1;
+            }
         }
         ImGui::EndChild();
         ImGui::NextColumn();
@@ -197,7 +219,10 @@ void ItemSpawner::DrawTab() {
         if (selectedCategoryIdx >= 0 && selectedCategoryIdx < Database::Categories.size()) {
             const auto& items = Database::Categories[selectedCategoryIdx].Items;
             for (int i = 0; i < items.size(); i++) {
-                if (ImGui::Selectable(items[i].Name, selectedItemIdx == i)) { selectedItemIdx = i; strcpy_s(manualIdBuffer, items[i].ID); }
+                if (ImGui::Selectable(items[i].Name, selectedItemIdx == i)) {
+                    selectedItemIdx = i;
+                    strcpy_s(manualIdBuffer, items[i].ID);
+                }
             }
         }
         ImGui::EndChild();
