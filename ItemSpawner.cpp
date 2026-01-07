@@ -67,7 +67,6 @@ SDK::UPalPlayerInventoryData* GetInventory(SDK::APalPlayerCharacter* pLocal) {
 
 // --- SPAWN METHODS (Namespace Scoped) ---
 
-// [FIX] Added ItemSpawner:: prefix to match header declaration
 void ItemSpawner::Spawn_Method1(SDK::APalPlayerCharacter* pLocal, const char* ItemID, int32_t Count) {
     auto InvData = GetInventory(pLocal);
     if (!IsValidObject(InvData)) return;
@@ -87,7 +86,6 @@ void ItemSpawner::Spawn_Method1(SDK::APalPlayerCharacter* pLocal, const char* It
     }
 }
 
-// [FIX] Added ItemSpawner:: prefix to match header declaration
 void ItemSpawner::Spawn_Method2(SDK::APalPlayerCharacter* pLocal, const char* ItemID, int32_t Count) {
     auto InvData = GetInventory(pLocal);
     if (!IsValidObject(InvData)) return;
@@ -115,7 +113,10 @@ void ItemSpawner::Spawn_Method2(SDK::APalPlayerCharacter* pLocal, const char* It
     // 3. Add Item (Server Attempt)
     InvData->AddItem_ServerInternal(ItemName, Count, true, 0.0f);
 
-    // 4. Client Override
+    // 4. Client Override (Clean + Set)
+    // [FIX] Ensuring the slot is technically "empty" before forcing new ID helps avoid ghosting
+    Slot->StackCount = 0;
+
     Slot->ItemId.StaticId = ItemName;
     Slot->StackCount = Count;
 
@@ -150,32 +151,59 @@ void ItemSpawner::DrawTab() {
 
     ImGui::Spacing();
 
-    // Fallback UI if search/grid code is missing in snippet
-    if (ImGui::BeginChild("Items", ImVec2(0, -60), true)) {
-        if (strlen(searchBuffer) > 0) {
-            std::string filter = searchBuffer;
-            for (const auto& cat : Database::Categories) {
-                for (const auto& item : cat.Items) {
-                    std::string itemName = item.Name;
-                    auto it = std::search(
-                        itemName.begin(), itemName.end(),
-                        filter.begin(), filter.end(),
-                        [](char ch1, char ch2) { return std::toupper(ch1) == std::toupper(ch2); }
-                    );
-                    if (it != itemName.end()) {
-                        if (ImGui::Selectable(item.Name)) strcpy_s(manualIdBuffer, item.ID);
+    // [FIX] Restored Category/Item List Logic
+    if (strlen(searchBuffer) > 0) {
+        // Search Results Mode
+        ImGui::BeginChild("SearchResults", ImVec2(0, -60), true);
+        std::string filter = searchBuffer;
+        for (const auto& cat : Database::Categories) {
+            for (const auto& item : cat.Items) {
+                std::string itemName = item.Name;
+                if (itemName.length() == 0) continue;
+
+                auto it = std::search(
+                    itemName.begin(), itemName.end(),
+                    filter.begin(), filter.end(),
+                    [](char ch1, char ch2) { return std::toupper(ch1) == std::toupper(ch2); }
+                );
+
+                if (it != itemName.end()) {
+                    if (ImGui::Selectable(item.Name, false)) {
+                        strcpy_s(manualIdBuffer, item.ID);
                     }
                 }
             }
         }
-        else {
-            for (const auto& cat : Database::Categories) {
-                for (const auto& item : cat.Items) {
-                    if (ImGui::Selectable(item.Name)) strcpy_s(manualIdBuffer, item.ID);
+        ImGui::EndChild();
+    }
+    else {
+        // Category Browser Mode
+        ImGui::Columns(2, "SpawnerColumns", true);
+        ImGui::SetColumnWidth(0, 160.0f);
+
+        ImGui::BeginChild("Categories", ImVec2(0, -60));
+        for (int i = 0; i < Database::Categories.size(); i++) {
+            if (ImGui::Selectable(Database::Categories[i].Name, selectedCategoryIdx == i)) {
+                selectedCategoryIdx = i;
+                selectedItemIdx = -1;
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::NextColumn();
+
+        ImGui::BeginChild("Items", ImVec2(0, -60));
+        if (selectedCategoryIdx >= 0 && selectedCategoryIdx < Database::Categories.size()) {
+            const auto& items = Database::Categories[selectedCategoryIdx].Items;
+            for (int i = 0; i < items.size(); i++) {
+                if (ImGui::Selectable(items[i].Name, selectedItemIdx == i)) {
+                    selectedItemIdx = i;
+                    strcpy_s(manualIdBuffer, items[i].ID);
                 }
             }
         }
         ImGui::EndChild();
+        ImGui::Columns(1);
     }
 
     ImGui::Separator();
@@ -184,7 +212,6 @@ void ItemSpawner::DrawTab() {
     ImGui::PushItemWidth(200); ImGui::InputText("##ManualID", manualIdBuffer, sizeof(manualIdBuffer)); ImGui::PopItemWidth();
     ImGui::SameLine();
 
-    // [FIX] Pass Local Player to Spawners
     auto pLocal = Hooking::GetLocalPlayerSafe();
 
     if (CustomButton("SPAWN (SP)", ImVec2(100, 30), false)) {
