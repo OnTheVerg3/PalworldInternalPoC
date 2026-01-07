@@ -13,15 +13,23 @@ namespace Teleporter
 {
     extern std::vector<CustomWaypoint> Waypoints;
 
-    // Simplified Interface
+    // [FIX] Flags for Game Thread Execution
+    extern bool bTeleportPending;
+    extern SDK::FVector TargetLocation;
+
+    // Interface
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName);
     void DeleteWaypoint(int index);
 
-    // Direct Teleport Actions
+    // UI calls this (Queueing)
     void TeleportTo(SDK::APalPlayerCharacter* pLocal, SDK::FVector Location);
+
+    // Game Thread calls this (Execution)
+    void ProcessQueue();
+
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal);
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex);
 
-    // [FIX] Declaration only. Implementation moved to .cpp to fix LNK2005.
+    // Fixes LNK2005 error
     void Reset();
 }

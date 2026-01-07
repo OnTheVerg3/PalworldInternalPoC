@@ -9,9 +9,12 @@ namespace Teleporter
 {
     std::vector<CustomWaypoint> Waypoints;
 
-    // [FIX] Implementation moved here
+    // [FIX] Thread Sync Variables
+    bool bTeleportPending = false;
+    SDK::FVector TargetLocation = { 0, 0, 0 };
+
     void Reset() {
-        // No internal state to clear for now, but function must exist for Linker
+        bTeleportPending = false;
     }
 
     void CallFn(SDK::UObject* obj, const char* fnName, void* params = nullptr) {
@@ -20,8 +23,20 @@ namespace Teleporter
         if (fn) obj->ProcessEvent(fn, params);
     }
 
+    // [FIX] Render Thread (UI) -> Queue
     void TeleportTo(SDK::APalPlayerCharacter* pLocal, SDK::FVector Location)
     {
+        TargetLocation = Location;
+        bTeleportPending = true;
+        std::cout << "[Jarvis] Teleport Queued." << std::endl;
+    }
+
+    // [FIX] Game Thread (hkProcessEvent) -> Execute
+    void ProcessQueue()
+    {
+        if (!bTeleportPending) return;
+
+        SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
         if (!IsValidObject(pLocal)) return;
 
         SDK::APlayerController* PC = static_cast<SDK::APlayerController*>(pLocal->Controller);
@@ -32,8 +47,7 @@ namespace Teleporter
 
         if (!IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
-        // Coordinates
-        SDK::FVector SafeLoc = { Location.X, Location.Y, Location.Z + 100.0f };
+        SDK::FVector SafeLoc = { TargetLocation.X, TargetLocation.Y, TargetLocation.Z + 100.0f };
         SDK::FQuat Rotation = { 0, 0, 0, 1 };
 
         struct {
@@ -46,11 +60,11 @@ namespace Teleporter
         RegisterParams.Location = SafeLoc;
         RegisterParams.Rotation = Rotation;
 
-        // Direct Execution (Safe due to RTV release in Hooking.cpp)
         CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
         CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
 
-        std::cout << "[Jarvis] Teleport Executed." << std::endl;
+        std::cout << "[Jarvis] Teleport Executed (Game Thread)." << std::endl;
+        bTeleportPending = false;
     }
 
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName) {
@@ -71,9 +85,6 @@ namespace Teleporter
         if (!SDK::UObject::GObjects) return;
         std::cout << "[Jarvis] Scanning for Base..." << std::endl;
 
-        bool bFound = false;
-
-        // [FIX] Broader search
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
@@ -82,11 +93,10 @@ namespace Teleporter
                 std::string Name = Obj->GetName();
                 std::transform(Name.begin(), Name.end(), Name.begin(), ::tolower);
 
-                // If it contains "base" and "camp", it's likely a base point
-                if (Name.find("base") != std::string::npos && Name.find("camp") != std::string::npos) {
-
-                    // Filter out UI or logical controllers
-                    if (Name.find("ui") != std::string::npos || Name.find("controller") != std::string::npos) continue;
+                // Matches "PalBuildObjectBaseCampPoint" (Physical Palbox)
+                if (Name.find("basecamppoint") != std::string::npos) {
+                    // Filter UI objects
+                    if (Name.find("ui") != std::string::npos) continue;
 
                     SDK::AActor* Actor = static_cast<SDK::AActor*>(Obj);
                     SDK::FVector Loc = Actor->K2_GetActorLocation();
@@ -94,13 +104,12 @@ namespace Teleporter
                     if (abs(Loc.X) > 1.0f || abs(Loc.Y) > 1.0f) {
                         std::cout << "[Jarvis] Teleporting to: " << Obj->GetName() << std::endl;
                         TeleportTo(pLocal, Loc);
-                        bFound = true;
-                        return; // Stop at first valid base
+                        return;
                     }
                 }
             }
         }
-        if (!bFound) std::cout << "[-] No Base Camp found." << std::endl;
+        std::cout << "[-] No Base Camp found." << std::endl;
     }
 
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex)
