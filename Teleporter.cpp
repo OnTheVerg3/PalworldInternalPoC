@@ -5,10 +5,15 @@
 #include <string> 
 #include <algorithm> 
 
+extern ID3D11DeviceContext* g_pd3dContext;
+extern ID3D11RenderTargetView* g_mainRenderTargetView;
+extern ULONGLONG g_TeleportCooldown;
+
 namespace Teleporter
 {
     std::vector<CustomWaypoint> Waypoints;
     bool bTeleportPending = false;
+    bool bExecuteRPC = false;
     SDK::FVector TargetLocation = { 0, 0, 0 };
 
     void CallFn(SDK::UObject* obj, const char* fnName, void* params = nullptr) {
@@ -21,24 +26,48 @@ namespace Teleporter
     {
         TargetLocation = Location;
         bTeleportPending = true;
-        std::cout << "[Jarvis] Teleport Queued." << std::endl;
     }
 
-    // [FIX] Now called from hkProcessEvent (Game Thread)
-    void ProcessQueue()
+    // --- STEP 1: RENDER THREAD (hkPresent) ---
+    void ProcessQueue_RenderThread()
     {
         if (!bTeleportPending) return;
 
+        // 1. Release D3D Resources IMMEDIATELY on the Render Thread
+        if (g_pd3dContext) {
+            ID3D11RenderTargetView* nullViews[] = { nullptr };
+            g_pd3dContext->OMSetRenderTargets(1, nullViews, nullptr);
+        }
+        if (g_mainRenderTargetView) {
+            g_mainRenderTargetView->Release();
+            g_mainRenderTargetView = nullptr;
+        }
+
+        // 2. Set Cooldown to prevent re-creation
+        g_TeleportCooldown = GetTickCount64() + 5000;
+
+        // 3. Hand off to Game Thread
+        bTeleportPending = false;
+        bExecuteRPC = true;
+
+        std::cout << "[Jarvis] D3D Released. Handoff to Game Thread." << std::endl;
+    }
+
+    // --- STEP 2: GAME THREAD (hkProcessEvent) ---
+    void ProcessQueue_GameThread()
+    {
+        if (!bExecuteRPC) return;
+
         SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
-        if (!IsValidObject(pLocal)) { bTeleportPending = false; return; }
+        if (!IsValidObject(pLocal)) { bExecuteRPC = false; return; }
 
         SDK::APlayerController* PC = static_cast<SDK::APlayerController*>(pLocal->Controller);
-        if (!IsValidObject(PC) || !IsValidObject(PC->PlayerState)) { bTeleportPending = false; return; }
+        if (!IsValidObject(PC) || !IsValidObject(PC->PlayerState)) { bExecuteRPC = false; return; }
 
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(PC);
         SDK::APalPlayerState* PalState = static_cast<SDK::APalPlayerState*>(PC->PlayerState);
 
-        SDK::FVector SafeLoc = { TargetLocation.X, TargetLocation.Y, TargetLocation.Z + 100.0f };
+        SDK::FVector SafeLoc = { TargetLocation.X, TargetLocation.Y, TargetLocation.Z + 50.0f };
         SDK::FQuat Rotation = { 0, 0, 0, 1 };
 
         struct {
@@ -54,10 +83,10 @@ namespace Teleporter
         if (IsValidObject(PalPC->Transmitter) && IsValidObject(PalPC->Transmitter->Player)) {
             CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
             CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
-            std::cout << "[Jarvis] Teleport Executed (Game Thread)." << std::endl;
+            std::cout << "[Jarvis] Teleport RPC Sent." << std::endl;
         }
 
-        bTeleportPending = false;
+        bExecuteRPC = false;
     }
 
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName)
@@ -77,10 +106,8 @@ namespace Teleporter
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal)
     {
         if (!SDK::UObject::GObjects) return;
-        std::cout << "[Jarvis] Scanning for Base Camp..." << std::endl;
+        std::cout << "[Jarvis] Scanning for Base..." << std::endl;
 
-        bool bFound = false;
-        // Search using robust string matching
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
@@ -89,21 +116,20 @@ namespace Teleporter
                 std::string Name = Obj->GetName();
                 std::transform(Name.begin(), Name.end(), Name.begin(), ::tolower);
 
-                // Matches standard base points
-                if (Name.find("palbasecamppoint") != std::string::npos) {
+                // Matches "PalLevelObjectBaseCampPoint", "BP_BaseCampPoint", etc.
+                if (Name.find("basecamppoint") != std::string::npos) {
                     SDK::AActor* Actor = static_cast<SDK::AActor*>(Obj);
                     SDK::FVector Loc = Actor->K2_GetActorLocation();
 
                     if (Loc.X != 0.0f || Loc.Y != 0.0f) {
-                        std::cout << "[Jarvis] Base Found: " << Obj->GetName() << std::endl;
+                        std::cout << "[Jarvis] Base Found: " << Name << std::endl;
                         QueueTeleport(Loc);
-                        bFound = true;
-                        break;
+                        return;
                     }
                 }
             }
         }
-        if (!bFound) std::cout << "[-] No Base Camp found." << std::endl;
+        std::cout << "[-] No Base Camp found." << std::endl;
     }
 
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex)

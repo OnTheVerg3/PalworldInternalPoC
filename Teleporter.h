@@ -13,15 +13,19 @@ namespace Teleporter
 {
     extern std::vector<CustomWaypoint> Waypoints;
 
-    // [FIX] State flags for Deferred Teleportation
-    extern bool bTeleportPending;
+    // Flags for Thread Synchronization
+    extern bool bTeleportPending;   // Set by UI (Render Thread)
+    extern bool bExecuteRPC;        // Set by Render Thread -> Read by Game Thread
     extern SDK::FVector TargetLocation;
 
-    // Queues a teleport request (Safe to call from UI)
+    // Called by UI to start the chain
     void QueueTeleport(SDK::FVector Location);
 
-    // Executes the queued teleport (Call from Hooking::hkPresent start)
-    void ProcessQueue();
+    // Called by Render Thread (hkPresent) to clean D3D
+    void ProcessQueue_RenderThread();
+
+    // Called by Game Thread (hkProcessEvent) to fire RPCs
+    void ProcessQueue_GameThread();
 
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName);
     void DeleteWaypoint(int index);

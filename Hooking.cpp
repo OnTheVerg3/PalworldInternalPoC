@@ -8,7 +8,7 @@
 #include "imgui_impl_dx11.h"
 #include "Player.h" 
 #include "Teleporter.h" 
-#include "Visuals.h" // Added for Camera updates
+#include "Visuals.h"
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -18,32 +18,21 @@
 
 #pragma comment(lib, "psapi.lib")
 
-// --- VMT HOOK INSTANCES ---
 VMTHook g_PawnHook;
 VMTHook g_ControllerHook;
 VMTHook g_ParamHook;
-
-// --- GLOBALS ---
 std::mutex g_HookMutex;
-
-// --- FAST ACCESS CACHE ---
 SDK::APalPlayerCharacter* g_pLocal = nullptr;
 SDK::UObject* g_pController = nullptr;
 SDK::UObject* g_pParam = nullptr;
-
-// Flags
 std::atomic<bool> g_bIsSafe(false);
 std::atomic<bool> g_PendingExit(false);
-
+ULONGLONG g_TeleportCooldown = 0;
 bool g_ShowMenu = false;
 bool g_bHasAutoOpened = false;
-
-// Helpers
 void* g_LastLocalPlayer = nullptr;
 ULONGLONG g_TimePlayerDetected = 0;
 ULONGLONG g_ExitCooldown = 0;
-
-// Rendering
 ID3D11Device* g_pd3dDevice = nullptr;
 ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
@@ -52,12 +41,9 @@ HWND g_window = nullptr;
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 Present oPresent;
 WNDPROC oWndProc;
-
 typedef void(__thiscall* ProcessEvent_t)(SDK::UObject*, SDK::UFunction*, void*);
-
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-// --- BOUNDS & UTILS ---
 uintptr_t g_GameBase = 0;
 uintptr_t g_GameSize = 0;
 
@@ -72,26 +58,17 @@ void InitModuleBounds() {
     }
 }
 
-// Helper to safely get names
 __declspec(noinline) void GetNameInternal(SDK::UObject* pObject, char* outBuf, size_t size) {
     std::string s = pObject->GetName();
-    if (s.length() < size) {
-        strcpy_s(outBuf, size, s.c_str());
-    }
-    else {
-        strncpy_s(outBuf, size, s.c_str(), size - 1);
-    }
+    if (s.length() < size) strcpy_s(outBuf, size, s.c_str());
+    else strncpy_s(outBuf, size, s.c_str(), size - 1);
 }
 
 void GetNameSafe(SDK::UObject* pObject, char* outBuf, size_t size) {
     memset(outBuf, 0, size);
     if (!IsValidObject(pObject)) return;
-    __try {
-        GetNameInternal(pObject, outBuf, size);
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        memset(outBuf, 0, size);
-    }
+    __try { GetNameInternal(pObject, outBuf, size); }
+    __except (1) { memset(outBuf, 0, size); }
 }
 
 bool RawStrContains(const char* haystack, const char* needle) {
@@ -99,13 +76,12 @@ bool RawStrContains(const char* haystack, const char* needle) {
     return strstr(haystack, needle) != nullptr;
 }
 
-// --- CLEANUP ---
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_PendingExit = false;
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
-
+    if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
     g_HookMutex.lock();
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
@@ -118,29 +94,20 @@ __declspec(noinline) void PerformWorldExit() {
     Player::Reset();
     Menu::Reset();
     g_HookMutex.unlock();
-
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
-    std::cout << "[Jarvis] World Exit: Cleanup Complete." << std::endl;
+    std::cout << "[Jarvis] World Exit Clean." << std::endl;
 }
 
-// --- DETACH CHECKER ---
 __declspec(noinline) void CheckForExit(SDK::UObject* pObject, const char* name) {
-    if (RawStrContains(name, "ReceiveDestroyed") ||
-        RawStrContains(name, "ReceiveEndPlay") ||
-        RawStrContains(name, "ClientReturnToMainMenu") ||
-        RawStrContains(name, "ClientTravel"))
-    {
+    if (RawStrContains(name, "ReceiveDestroyed") || RawStrContains(name, "ReceiveEndPlay") ||
+        RawStrContains(name, "ClientReturnToMainMenu") || RawStrContains(name, "ClientTravel")) {
         if (pObject == g_pLocal || pObject == g_pController) {
-            if (!g_PendingExit) {
-                std::cout << "[Jarvis] Exit detected. Scheduling Cleanup." << std::endl;
-                g_PendingExit = true;
-            }
+            if (!g_PendingExit) g_PendingExit = true;
         }
     }
 }
 
-// --- INPUT HANDLER ---
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
@@ -149,22 +116,16 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
     if (g_ShowMenu && g_bIsSafe) {
         if (g_pd3dDevice) ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
         switch (uMsg) {
-        case WM_MOUSEMOVE:
-        case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
-        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK:
-        case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK:
-        case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
-        case WM_MOUSEWHEEL:
-        case WM_KEYDOWN: case WM_KEYUP:
-        case WM_SYSKEYDOWN: case WM_SYSKEYUP:
-        case WM_CHAR:
-            return 1;
+        case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
+        case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK: case WM_MBUTTONDOWN:
+        case WM_MBUTTONUP: case WM_MBUTTONDBLCLK: case WM_XBUTTONDOWN: case WM_XBUTTONUP:
+        case WM_XBUTTONDBLCLK: case WM_MOUSEWHEEL: case WM_KEYDOWN: case WM_KEYUP:
+        case WM_SYSKEYDOWN: case WM_SYSKEYUP: case WM_CHAR: return 1;
         }
     }
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
-// --- CHEAT LOGIC ---
 bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const char* name) {
     if (Features::bInfiniteDurability) {
         if (RawStrContains(name, "UpdateDurability") || RawStrContains(name, "Deterioration") || RawStrContains(name, "Broken")) return true;
@@ -173,29 +134,23 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
         if (RawStrContains(name, "Consume") && RawStrContains(name, "Bullet")) return true;
         if (RawStrContains(name, "Decrease") && RawStrContains(name, "Bullet")) return true;
     }
-    if (Features::bInfiniteMagazine) {
-        if (RawStrContains(name, "Reload")) return true;
-    }
+    if (Features::bInfiniteMagazine && RawStrContains(name, "Reload")) return true;
     return false;
 }
 
-// --- HOOKS ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     ProcessEvent_t oFunc = nullptr;
     if (pObject == g_pLocal) oFunc = g_PawnHook.GetOriginal<ProcessEvent_t>(67);
     else if (pObject == g_pController) oFunc = g_ControllerHook.GetOriginal<ProcessEvent_t>(67);
     else if (pObject == g_pParam) oFunc = g_ParamHook.GetOriginal<ProcessEvent_t>(67);
-
     if (!oFunc) return;
 
     __try {
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
 
-        // [FIX] Execute Queued Actions on Game Thread (Safe!)
-        // This solves the 80004004 Crash and RPC failures.
         if (pObject == g_pLocal) {
-            Teleporter::ProcessQueue();
-            Visuals::Update();
+            // [FIX] Process Teleport RPCs on Game Thread
+            Teleporter::ProcessQueue_GameThread();
         }
 
         char name[256];
@@ -213,17 +168,11 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
     __try {
         if (!SDK::pGWorld || !*SDK::pGWorld) return nullptr;
-        SDK::UWorld* pWorld = *SDK::pGWorld;
-        if (!IsValidObject(pWorld)) return nullptr;
-        SDK::UGameInstance* pGI = pWorld->OwningGameInstance;
+        SDK::UGameInstance* pGI = (*SDK::pGWorld)->OwningGameInstance;
         if (!IsValidObject(pGI) || pGI->LocalPlayers.Num() <= 0) return nullptr;
-        SDK::ULocalPlayer* pLocalPlayer = pGI->LocalPlayers[0];
-        if (!IsValidObject(pLocalPlayer)) return nullptr;
-        SDK::APlayerController* pPC = pLocalPlayer->PlayerController;
-        if (!IsValidObject(pPC)) return nullptr;
-        SDK::APawn* pPawn = pPC->Pawn;
-        if (!IsValidObject(pPawn)) return nullptr;
-        return static_cast<SDK::APalPlayerCharacter*>(pPawn);
+        SDK::ULocalPlayer* LP = pGI->LocalPlayers[0];
+        if (!IsValidObject(LP) || !LP->PlayerController) return nullptr;
+        return static_cast<SDK::APalPlayerCharacter*>(LP->PlayerController->Pawn);
     }
     __except (1) { return nullptr; }
 }
@@ -231,12 +180,10 @@ SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
 void AttachPlayerHooks_Logic() {
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) return;
-
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] New Player Detected. Attaching VMT Hooks..." << std::endl;
+        std::cout << "[System] Attaching VMT Hooks..." << std::endl;
         g_HookMutex.lock();
-        Features::Reset();
-        Player::Reset();
+        Features::Reset(); Player::Reset();
         g_pLocal = pLocal;
         g_pController = pLocal->Controller;
         g_pParam = pLocal->CharacterParameterComponent;
@@ -251,19 +198,12 @@ void AttachPlayerHooks_Logic() {
 void Present_Logic() {
     if (g_PendingExit) { PerformWorldExit(); return; }
     if (GetTickCount64() < g_ExitCooldown) { g_bIsSafe = false; return; }
-
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
-    if (!IsValidObject(pLocal)) {
-        if (g_LastLocalPlayer != nullptr) PerformWorldExit();
-        return;
-    }
-
+    if (!IsValidObject(pLocal)) { if (g_LastLocalPlayer) PerformWorldExit(); return; }
     if (g_TimePlayerDetected == 0) g_TimePlayerDetected = GetTickCount64();
     if ((GetTickCount64() - g_TimePlayerDetected) < 3000) { g_bIsSafe = false; return; }
-
     g_bIsSafe = true;
     AttachPlayerHooks_Logic();
-
     g_HookMutex.lock();
     __try { Features::RunLoop(); }
     __except (1) {}
@@ -275,59 +215,48 @@ void Present_Logic() {
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    static bool bInputInitialized = false;
-    if (!bInputInitialized) {
+    // [FIX] Process Teleport Cleanup on Render Thread BEFORE drawing
+    if (Teleporter::bTeleportPending) {
+        Teleporter::ProcessQueue_RenderThread();
+        return oPresent(pSwapChain, SyncInterval, Flags); // Skip this frame
+    }
+    if (GetTickCount64() < g_TeleportCooldown) return oPresent(pSwapChain, SyncInterval, Flags);
+
+    static bool bInit = false;
+    if (!bInit) {
         DXGI_SWAP_CHAIN_DESC sd; pSwapChain->GetDesc(&sd);
         g_window = sd.OutputWindow;
         oWndProc = (WNDPROC)SetWindowLongPtr(g_window, GWLP_WNDPROC, (LONG_PTR)WndProc);
-        ImGui::CreateContext();
-        ImGui_ImplWin32_Init(g_window);
-        bInputInitialized = true;
+        ImGui::CreateContext(); ImGui_ImplWin32_Init(g_window); bInit = true;
     }
 
     if (!g_mainRenderTargetView) {
-        ID3D11Texture2D* pBackBuffer = nullptr;
+        ID3D11Texture2D* pBackBuffer;
         pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice);
-        if (g_pd3dDevice) {
-            g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
-            pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
-            if (pBackBuffer) {
-                g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView);
-                pBackBuffer->Release();
-                ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dContext);
-            }
-        }
+        g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
+        pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
+        g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView);
+        pBackBuffer->Release();
+        ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dContext);
     }
 
     __try { Present_Logic(); }
     __except (1) { g_bIsSafe = false; }
 
     if (g_mainRenderTargetView) {
-        ImGui_ImplDX11_NewFrame();
-        ImGui_ImplWin32_NewFrame();
-        ImGui::NewFrame();
-
+        ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
         g_HookMutex.lock();
         if (g_bIsSafe) {
             if (!g_bHasAutoOpened) { g_ShowMenu = true; g_bHasAutoOpened = true; }
-            if (g_ShowMenu) {
-                ImGui::GetIO().MouseDrawCursor = true;
-                Menu::Draw();
-            }
-            else {
-                ImGui::GetIO().MouseDrawCursor = false;
-            }
+            if (g_ShowMenu) { ImGui::GetIO().MouseDrawCursor = true; Menu::Draw(); }
+            else ImGui::GetIO().MouseDrawCursor = false;
         }
-        else {
-            ImGui::GetIO().MouseDrawCursor = false;
-        }
+        else ImGui::GetIO().MouseDrawCursor = false;
         g_HookMutex.unlock();
-
         ImGui::Render();
         g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
         ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     }
-
     return oPresent(pSwapChain, SyncInterval, Flags);
 }
 
@@ -353,11 +282,8 @@ void Hooking::Init() {
 }
 
 void Hooking::Shutdown() {
-    g_PawnHook.Restore();
-    g_ControllerHook.Restore();
-    g_ParamHook.Restore();
-    MH_DisableHook(MH_ALL_HOOKS);
-    MH_Uninitialize();
+    g_PawnHook.Restore(); g_ControllerHook.Restore(); g_ParamHook.Restore();
+    MH_DisableHook(MH_ALL_HOOKS); MH_Uninitialize();
 }
 
 void Hooking::AttachPlayerHooks() { AttachPlayerHooks_Logic(); }

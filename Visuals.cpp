@@ -1,34 +1,30 @@
 #include "Visuals.h"
 #include "SDKGlobal.h"
-#include "Hooking.h"
+#include "Hooking.h" // Contains IsValidObject
 #include <string>
 
 namespace Visuals {
     float fFOV = 90.0f;
-    float fGamma = 1.0f; // 1.0 is default/neutral here
+    float fGamma = 1.0f;
 
     void Apply() {
+        // Enforce FOV
         std::string fovCmd = "fov " + std::to_string((int)fFOV);
         SDK::ExecuteConsoleCommand(fovCmd);
+
+        // Enforce Gamma (Midtones)
+        // Lower values = Brighter in UE5 r.Color.Mid
+        std::string gammaCmd = "r.Color.Mid " + std::to_string(fGamma);
+        SDK::ExecuteConsoleCommand(gammaCmd);
     }
 
     void Update() {
-        // [FIX] Direct Camera Component Modification (Game Thread)
-        // This is how the provided 'cheat_state.cpp' did it.
-        SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
-        if (!SDK::IsValidObject(pLocal) || !SDK::IsValidObject(pLocal->FollowCamera)) return;
+        // Continuous enforcement via Console Commands is safer given the SDK issues
+        // We throttle this to avoid spamming the console every tick if needed, 
+        // but for now, we just rely on Apply() being called from UI or periodically.
 
-        auto* Camera = pLocal->FollowCamera;
-
-        // FOV (Continuous enforcement)
-        Camera->WalkFOV = fFOV;
-        Camera->SprintFOV = fFOV;
-        Camera->AimFOV = fFOV;
-
-        // Brightness (AutoExposureBias)
-        // Enabled override and set value
-        Camera->PostProcessSettings.bOverride_AutoExposureBias = true;
-        Camera->PostProcessBlendWeight = 1.0f;
-        Camera->PostProcessSettings.AutoExposureBias = fGamma;
+        // If you want continuous enforcement, uncomment this, 
+        // but ConsoleCommands are heavy. Better to call Apply() on change.
+        // Apply(); 
     }
 }
