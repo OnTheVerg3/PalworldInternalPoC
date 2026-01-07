@@ -73,7 +73,7 @@ void Menu::Draw() {
 
             // [FIX] Inverted Gamma slider so Right = Brighter (0.1)
             // Low Value = Brighter Midtones in UE
-            if (ImGui::SliderFloat("Brightness", &Visuals::fGamma, 2.0f, 0.005f, "%.2f")) Visuals::Apply();
+            if (ImGui::SliderFloat("Brightness", &Visuals::fGamma, 2.0f, 0.05f, "%.2f")) Visuals::Apply();
 
             if (ImGui::Button("Reset", ImVec2(150, 30))) { Visuals::fFOV = 90.0f; Visuals::fGamma = 0.5f; Visuals::Apply(); }
             break;
@@ -81,7 +81,7 @@ void Menu::Draw() {
         case 3: ItemSpawner::DrawTab(); break;
 
         case 4: // TELEPORTER
-        {   // [FIX] Added Scoping Braces
+        {   // [FIX] Added Scoping Braces to fix C2360 error
             auto pLocal = Hooking::GetLocalPlayerSafe();
             ColoredSeparatorText("Base & Bosses", ImVec4(0.3f, 1.0f, 0.3f, 1));
             if (ImGui::Button("TP to Base", ImVec2(-1, 30))) if (pLocal) Teleporter::TeleportToHome(pLocal);

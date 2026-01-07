@@ -5,9 +5,10 @@
 #include <string> 
 #include <algorithm> // For std::transform
 
-// [FIX] Need Context to unbind and View to release
+// [FIX] Needed to release the D3D context before teleporting to prevent Error 80004004
 extern ID3D11DeviceContext* g_pd3dContext;
 extern ID3D11RenderTargetView* g_mainRenderTargetView;
+extern ULONGLONG g_TeleportCooldown; // [FIX] Access the cooldown timer
 
 namespace Teleporter
 {
@@ -31,14 +32,13 @@ namespace Teleporter
 
         if (!IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
-        // [CRITICAL FIX] 80004004 Crash Prevention
-        // 1. Unbind the Render Target from the Pixel Output stage
+        // [CRITICAL FIX] Set cooldown and release D3D resources
+        g_TeleportCooldown = GetTickCount64() + 5000; // Block UI/RTV for 5 seconds
+
         if (g_pd3dContext) {
             ID3D11RenderTargetView* nullViews[] = { nullptr };
             g_pd3dContext->OMSetRenderTargets(1, nullViews, nullptr);
         }
-
-        // 2. Release the View reference so the Engine can destroy the SwapChain
         if (g_mainRenderTargetView) {
             g_mainRenderTargetView->Release();
             g_mainRenderTargetView = nullptr;

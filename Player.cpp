@@ -93,7 +93,11 @@ namespace Player
                 if (bWeightAdjuster) {
                     inv->MaxInventoryWeight = fWeightModifier;
                 }
-                // [FIX] Removed reset logic. It now stays modified until restart or manual change.
+                else {
+                    // [FIX] Reset to default if disabled
+                    // Only reset if it looks modified (e.g. > 5000) to avoid spamming
+                    if (inv->MaxInventoryWeight > 5000.0f) inv->MaxInventoryWeight = 500.0f;
+                }
             }
         }
     }
@@ -110,7 +114,7 @@ namespace Player
             GetNameSafe(Obj, nameBuf, sizeof(nameBuf));
             if (strstr(nameBuf, "PalGameSetting") && !strstr(nameBuf, "Default__")) {
                 SDK::UPalGameSetting* pSettings = static_cast<SDK::UPalGameSetting*>(Obj);
-                pSettings->worldmapUIMaskClearSize = 99999.0f;
+                pSettings->worldmapUIMaskClearSize = 99999.0f; // Max out clear radius
             }
         }
         std::cout << "[Jarvis] Map revealed." << std::endl;
@@ -121,17 +125,18 @@ namespace Player
         if (!SDK::UObject::GObjects) return;
         std::cout << "[Jarvis] Unlocking Fast Travel..." << std::endl;
 
+        SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
+        if (!IsValidObject(PalPC) || !IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
+
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
 
-            // Look for Fast Travel Points
             if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
                 auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
+                // [FIX] Only unlock if currently locked
                 if (!FT->bUnlocked) {
-                    // [FIX] Force Interaction instead of just requesting
-                    // This simulates the player walking up and interacting
-                    FT->OnTriggerInteract(pLocal, SDK::EPalInteractiveObjectIndicatorType::UnlockFastTravel);
+                    PalPC->Transmitter->Player->RequestUnlockFastTravelPoint_ToServer(FT->FastTravelPointID);
                 }
             }
         }
@@ -145,6 +150,7 @@ namespace Player
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
         if (!IsValidObject(PalPC) || !IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
+        // Build Cache
         if (g_RelicCache.empty()) {
             if (SDK::UObject::GObjects) {
                 for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
@@ -160,6 +166,7 @@ namespace Player
             if (g_RelicCache.empty()) { bCollectRelics = false; return; }
         }
 
+        // Collect One
         auto it = g_RelicCache.begin();
         if (it != g_RelicCache.end()) {
             SDK::APalLevelObjectObtainable* Relic = *it;

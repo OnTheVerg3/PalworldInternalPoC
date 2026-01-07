@@ -16,6 +16,8 @@
 
 #pragma comment(lib, "psapi.lib")
 
+
+//Took 4 DAYS to find VMT Hooks were the answer for stability NEVER CHANGE THE METHOD WITHOUT ASKING
 // --- VMT HOOK INSTANCES ---
 VMTHook g_PawnHook;
 VMTHook g_ControllerHook;
