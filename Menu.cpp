@@ -14,7 +14,7 @@ void Menu::InitTheme() { SetupImGuiStyle(); }
 void Menu::Reset() { selectedTab = 0; g_PlayerList.clear(); g_SelectedPlayerIdx = -1; }
 
 void Menu::Draw() {
-    // [FIX] Removed Visuals and Teleporter from list
+    // [FIX] Removed Visuals/Teleporter
     const char* menuItems[] = { "Player", "Weapons", "Spawner", "Settings" };
 
     ImGui::SetNextWindowSize(ImVec2(750, 500), ImGuiCond_FirstUseEver);
@@ -46,12 +46,10 @@ void Menu::Draw() {
                 std::string preview = (g_SelectedPlayerIdx >= 0) ? g_PlayerList[g_SelectedPlayerIdx].DisplayString : "Select Player...";
                 if (ImGui::BeginCombo("##PlayerSelect", preview.c_str())) {
                     for (int i = 0; i < g_PlayerList.size(); i++) {
-                        bool isSelected = (g_SelectedPlayerIdx == i);
-                        if (ImGui::Selectable(g_PlayerList[i].DisplayString.c_str(), isSelected)) {
+                        if (ImGui::Selectable(g_PlayerList[i].DisplayString.c_str(), g_SelectedPlayerIdx == i)) {
                             g_SelectedPlayerIdx = i;
                             Hooking::SetManualPlayer(g_PlayerList[i].Ptr);
                         }
-                        if (isSelected) ImGui::SetItemDefaultFocus();
                     }
                     ImGui::EndCombo();
                 }
@@ -61,7 +59,6 @@ void Menu::Draw() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ColoredSeparatorText("Stats & World", ImVec4(1, 1, 1, 1));
             ImGui::Checkbox("Infinite Stamina", &Features::bInfiniteStamina);
-            ImGui::Spacing();
             ImGui::Checkbox("Attack Multiplier", &Player::bAttackMultiplier);
             if (Player::bAttackMultiplier) { ImGui::SameLine(); ImGui::SetNextItemWidth(150); ImGui::SliderFloat("##AttackMod", &Player::fAttackModifier, 1.0f, 100.0f, "%.1fx"); }
             ImGui::Checkbox("Weight Adjuster", &Player::bWeightAdjuster);
@@ -82,11 +79,11 @@ void Menu::Draw() {
             if (Features::bDamageHack) { ImGui::SameLine(); ImGui::SliderInt("##DmgMult", &Features::DamageMultiplier, 1, 100, "%dx"); }
             break;
 
-        case 2: // SPAWNER (Re-indexed)
+        case 2: // SPAWNER
             ItemSpawner::DrawTab();
             break;
 
-        case 3: // SETTINGS (Re-indexed)
+        case 3: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
             ImGui::Text("Version 3.8 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
