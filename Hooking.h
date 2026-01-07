@@ -13,6 +13,7 @@ extern uintptr_t g_GameBase;
 extern uintptr_t g_GameSize;
 
 // --- SHARED GLOBALS ---
+// These allow all other files to access the variables defined in Hooking.cpp
 extern std::atomic<bool> g_bIsSafe;
 extern SDK::APalPlayerCharacter* g_pLocal;
 
@@ -34,9 +35,7 @@ inline bool IsValidObject(SDK::UObject* pObj) {
         void** vtablePtr = reinterpret_cast<void**>(pObj);
         void* vtable = *vtablePtr;
 
-        // [FIX] Use IsGarbagePtr only. 
-        // Do NOT check if vtable is inside g_GameBase module.
-        // VMT Hooks move the vtable to the Heap, which is outside the module.
+        // Use IsGarbagePtr only. VMT Hooks move vtables to Heap, so bounds checks fail.
         if (IsGarbagePtr(vtable)) return false;
 
         return true;

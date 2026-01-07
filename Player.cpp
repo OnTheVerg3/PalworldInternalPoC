@@ -1,13 +1,10 @@
 #include "Player.h"
-#include "Hooking.h" 
+#include "Hooking.h" // [FIX] Includes extern declaration for g_bIsSafe
 #include <iostream>
 #include <vector>
 #include <cstring> 
 #include <algorithm>
 #include <unordered_map>
-
-// Access external safe flag
-extern std::atomic<bool> g_bIsSafe;
 
 namespace Player
 {
@@ -63,6 +60,7 @@ namespace Player
 
     void Update(SDK::APalPlayerCharacter* pLocal)
     {
+        // [FIX] Use shared global flag
         if (!g_bIsSafe || !IsValidObject(pLocal)) return;
 
         __try {
@@ -86,7 +84,7 @@ namespace Player
             }
         }
         __except (1) {
-            // Logic exception (Exit detected)
+            // Logic exception
         }
     }
 

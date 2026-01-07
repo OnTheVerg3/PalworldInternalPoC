@@ -7,8 +7,7 @@
 #include "SDKGlobal.h"
 #include "imgui_style.h"
 
-// [FIX] Removed duplicate definition of g_pLocal. 
-// It is now an extern from Hooking.h
+// [FIX] Removed duplicate definition. Now uses extern from Hooking.h
 
 // Static internal state
 static int selectedTab = 0;

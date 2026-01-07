@@ -1,11 +1,9 @@
 #include "Features.h"
 #include "SDKGlobal.h"
-#include "Hooking.h"
+#include "Hooking.h" // [FIX] Includes extern declaration for g_bIsSafe
 #include <iostream>
 #include <unordered_map>
 #include <windows.h> 
-
-extern std::atomic<bool> g_bIsSafe;
 
 namespace Features {
     bool bInfiniteStamina = false;
@@ -50,7 +48,7 @@ namespace Features {
     }
 
     void RunLoop_Logic() {
-        // [SAFETY] ABSOLUTE KILL SWITCH
+        // [SAFETY] Check Global Safe Flag via Hooking.h
         if (!g_bIsSafe) return;
 
         if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
@@ -61,7 +59,6 @@ namespace Features {
 
         // --- INFINITE STAMINA ---
         if (bInfiniteStamina) {
-            // [FIX] Removed 'static' to prevent stale pointers across world loads
             auto fnResetSP = GetCachedFunc("Function Pal.PalCharacterParameterComponent.ResetSP");
             if (fnResetSP && IsValidObject(fnResetSP)) {
                 pLocal->CharacterParameterComponent->ProcessEvent(fnResetSP, nullptr);
