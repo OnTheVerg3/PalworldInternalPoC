@@ -36,7 +36,6 @@ SDK::FGuid GenerateGuid() {
 SDK::UObject* FindRealInventoryData() {
     if (!SDK::UObject::GObjects) return nullptr;
 
-    // Cache Class to avoid repetitive lookups
     static SDK::UClass* TargetClass = nullptr;
     if (!TargetClass) TargetClass = SDK::UObject::FindObject<SDK::UClass>("Class Pal.PalPlayerInventoryData");
     if (!TargetClass) return nullptr;
@@ -47,7 +46,6 @@ SDK::UObject* FindRealInventoryData() {
 
         if (Obj->IsA(TargetClass)) {
             std::string name = Obj->GetName();
-            // Exclude Class Default Objects (CDO)
             if (name.find("Default__") != std::string::npos) continue;
             return Obj;
         }
@@ -55,31 +53,37 @@ SDK::UObject* FindRealInventoryData() {
     return nullptr;
 }
 
-// [FIX] Brute-force finder for String Library
+// [FIX] Reliable Name Conversion using StaticClass
 SDK::FName GetItemName(const char* ItemID) {
     static SDK::UKismetStringLibrary* Lib = nullptr;
 
-    if (!Lib && SDK::UObject::GObjects) {
-        // Scan ALL objects to find the library instance
-        for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
-            SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
-            if (!IsValidObject(Obj)) continue;
+    if (!IsValidObject(Lib)) {
+        // Try finding by StaticClass - most robust method
+        SDK::UClass* LibClass = SDK::UKismetStringLibrary::StaticClass();
+        if (LibClass && SDK::UObject::GObjects) {
+            for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
+                SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
+                if (!IsValidObject(Obj)) continue;
 
-            std::string name = Obj->GetName();
-            // Look for the default object
-            if (name.find("KismetStringLibrary") != std::string::npos && name.find("Default__") != std::string::npos) {
-                Lib = static_cast<SDK::UKismetStringLibrary*>(Obj);
-                std::cout << "[Jarvis] Found StringLib: " << name << std::endl;
-                break;
+                // Found the instance of the library
+                if (Obj->IsA(LibClass) && Obj->GetName().find("Default__") != std::string::npos) {
+                    Lib = static_cast<SDK::UKismetStringLibrary*>(Obj);
+                    break;
+                }
             }
         }
     }
 
-    if (Lib) {
+    if (IsValidObject(Lib)) {
         return Lib->Conv_StringToName(StdToFString(ItemID));
     }
 
-    std::cout << "[-] Critical: KismetStringLibrary NOT found in GObjects." << std::endl;
+    // Fallback: Try direct FindObject as last resort
+    if (!Lib) Lib = static_cast<SDK::UKismetStringLibrary*>(SDK::UObject::FindObject("Default__KismetStringLibrary"));
+
+    if (Lib) return Lib->Conv_StringToName(StdToFString(ItemID));
+
+    std::cout << "[-] Critical: KismetStringLibrary NOT found." << std::endl;
     return SDK::FName();
 }
 
@@ -89,8 +93,8 @@ void Spawn_Method1(SDK::UObject* pInventory, const char* ItemID, int32_t Count) 
     if (!pInventory) return;
 
     SDK::FName ItemName = GetItemName(ItemID);
-    // Removed explicit Index check to fix build error. 
-    // If ItemName is invalid, the engine functions below will simply fail gracefully.
+    // Index 0 usually means NAME_None
+    if (ItemName.Index == 0) return;
 
     auto fn = SDK::UObject::FindObject<SDK::UFunction>("Function Pal.PalPlayerInventoryData.AddItem_ServerInternal");
     if (fn) {
@@ -113,27 +117,24 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
 
     // 1. Get ID
     SDK::FName ItemName = GetItemName(ItemID);
-
-    // [FIX] Removed check for ItemName.Index which caused build error E0135
+    if (ItemName.Index == 0) {
+        std::cout << "[-] Invalid Item ID (Name conversion failed)" << std::endl;
+        return;
+    }
 
     // 2. Find Container & Slot
     SDK::UPalItemContainer* Container = nullptr;
-
-    // Try getting container normally
     if (!InvData->TryGetContainerFromStaticItemID(ItemName, &Container) || !Container) {
-        std::cout << "[-] Auto-container failed. Attempting fallback..." << std::endl;
+        std::cout << "[-] No Container for Item." << std::endl;
         return;
     }
 
     SDK::UPalItemSlot* Slot = nullptr;
     auto InvType = InvData->GetInventoryTypeFromStaticItemID(ItemName);
-
     if (!InvData->TryGetEmptySlot(InvType, &Slot) || !Slot) {
         std::cout << "[-] Inventory Full or Type Mismatch." << std::endl;
         return;
     }
-
-    std::cout << "[Jarvis] Slot Found. Injecting item..." << std::endl;
 
     // 3. Add Item (Server Attempt)
     InvData->AddItem_ServerInternal(ItemName, Count, true, 0.0f);
@@ -158,7 +159,6 @@ void Spawn_Method2(SDK::APlayerController* pController, SDK::UObject* pInventory
         std::cout << "[Jarvis] MP Sync Sent: " << ItemID << std::endl;
     }
 
-    // Refresh UI
     InvData->RequestForceMarkAllDirty_ToServer(true);
 }
 
