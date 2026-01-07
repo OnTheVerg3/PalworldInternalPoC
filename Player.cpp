@@ -93,6 +93,7 @@ namespace Player
                 if (bWeightAdjuster) {
                     inv->MaxInventoryWeight = fWeightModifier;
                 }
+                // [FIX] Removed reset logic. It now stays modified until restart or manual change.
             }
         }
     }
@@ -120,18 +121,17 @@ namespace Player
         if (!SDK::UObject::GObjects) return;
         std::cout << "[Jarvis] Unlocking Fast Travel..." << std::endl;
 
-        SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
-        if (!IsValidObject(PalPC) || !IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
-
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
 
+            // Look for Fast Travel Points
             if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
                 auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
-                // [FIX] Only unlock if currently locked
                 if (!FT->bUnlocked) {
-                    PalPC->Transmitter->Player->RequestUnlockFastTravelPoint_ToServer(FT->FastTravelPointID);
+                    // [FIX] Force Interaction instead of just requesting
+                    // This simulates the player walking up and interacting
+                    FT->OnTriggerInteract(pLocal, SDK::EPalInteractiveObjectIndicatorType::UnlockFastTravel);
                 }
             }
         }

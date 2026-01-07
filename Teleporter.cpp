@@ -3,8 +3,10 @@
 #include <iostream>
 #include <cstring>
 #include <string> 
+#include <algorithm> // For std::transform
 
-// [FIX] Needed to release the D3D context before teleporting to prevent Error 80004004
+// [FIX] Need Context to unbind and View to release
+extern ID3D11DeviceContext* g_pd3dContext;
 extern ID3D11RenderTargetView* g_mainRenderTargetView;
 
 namespace Teleporter
@@ -29,9 +31,14 @@ namespace Teleporter
 
         if (!IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
-        // [FIX] Release D3D BackBuffer. 
-        // Teleporting triggers a loading screen/viewport reset. 
-        // If we hold this pointer, the engine crashes (80004004).
+        // [CRITICAL FIX] 80004004 Crash Prevention
+        // 1. Unbind the Render Target from the Pixel Output stage
+        if (g_pd3dContext) {
+            ID3D11RenderTargetView* nullViews[] = { nullptr };
+            g_pd3dContext->OMSetRenderTargets(1, nullViews, nullptr);
+        }
+
+        // 2. Release the View reference so the Engine can destroy the SwapChain
         if (g_mainRenderTargetView) {
             g_mainRenderTargetView->Release();
             g_mainRenderTargetView = nullptr;
@@ -53,7 +60,7 @@ namespace Teleporter
         CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
         CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
 
-        std::cout << "[Jarvis] Teleporting..." << std::endl;
+        std::cout << "[Jarvis] Teleport executed. D3D Resources released." << std::endl;
     }
 
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName)
@@ -70,7 +77,7 @@ namespace Teleporter
         if (index >= 0 && index < Waypoints.size()) Waypoints.erase(Waypoints.begin() + index);
     }
 
-    // [FIX] Robust Base Finder (String Match)
+    // [FIX] Case-Insensitive Search for Base Camp
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal)
     {
         if (!SDK::UObject::GObjects) return;
@@ -83,26 +90,28 @@ namespace Teleporter
             if (Obj->IsA(SDK::AActor::StaticClass())) {
                 std::string ObjName = Obj->GetName();
 
-                // Matches "BP_PalBaseCampPoint_C", "PalLevelObjectBaseCampPoint", etc.
-                if (ObjName.find("BaseCampPoint") != std::string::npos) {
+                // Convert to lowercase for safer matching
+                std::string LowerName = ObjName;
+                std::transform(LowerName.begin(), LowerName.end(), LowerName.begin(), ::tolower);
+
+                // Look for "basecamppoint" inside names like "BP_PalBaseCampPoint_C"
+                if (LowerName.find("basecamppoint") != std::string::npos) {
                     SDK::AActor* BaseActor = static_cast<SDK::AActor*>(Obj);
                     SDK::FVector BaseLoc = BaseActor->K2_GetActorLocation();
 
-                    // Filter out 0,0,0 garbage
                     if (BaseLoc.X != 0.0f && BaseLoc.Y != 0.0f) {
                         std::cout << "[Jarvis] Found Base: " << ObjName << std::endl;
                         TeleportTo(pLocal, BaseLoc);
-                        return;
+                        return; // Teleport to the first one found
                     }
                 }
             }
         }
-        std::cout << "[-] No Base Camp found." << std::endl;
+        std::cout << "[-] No Base Camp found in loaded chunks." << std::endl;
     }
 
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex)
     {
-        // [FIX] Real Coordinates
         static const struct { const char* Name; SDK::FVector Loc; } Bosses[] = {
             { "Zoe & Grizzbolt", { 11200.0f, -43400.0f, 0.0f } },
             { "Lily & Lyleen",   { 18500.0f, 2800.0f, 0.0f } },

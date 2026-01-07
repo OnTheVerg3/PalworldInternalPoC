@@ -37,7 +37,6 @@ void Menu::Draw() {
         case 0: // PLAYER
             ColoredSeparatorText("Character Stats", ImVec4(1, 1, 1, 1));
             ImGui::Checkbox("Infinite Stamina", &Features::bInfiniteStamina);
-            ImGui::Spacing();
             ImGui::Checkbox("Attack Multiplier", &Player::bAttackMultiplier);
             if (Player::bAttackMultiplier) {
                 ImGui::SameLine(); ImGui::SetNextItemWidth(150);
@@ -74,7 +73,7 @@ void Menu::Draw() {
 
             // [FIX] Inverted Gamma slider so Right = Brighter (0.1)
             // Low Value = Brighter Midtones in UE
-            if (ImGui::SliderFloat("Brightness", &Visuals::fGamma, 1.0f, 0.1f, "%.2f")) Visuals::Apply();
+            if (ImGui::SliderFloat("Brightness", &Visuals::fGamma, 2.0f, 0.005f, "%.2f")) Visuals::Apply();
 
             if (ImGui::Button("Reset", ImVec2(150, 30))) { Visuals::fFOV = 90.0f; Visuals::fGamma = 0.5f; Visuals::Apply(); }
             break;
