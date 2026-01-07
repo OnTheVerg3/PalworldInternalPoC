@@ -15,8 +15,6 @@ extern uintptr_t g_GameSize;
 // --- SHARED GLOBALS ---
 extern std::atomic<bool> g_bIsSafe;
 extern SDK::APalPlayerCharacter* g_pLocal;
-
-// [FIX] Cooldown timer to block D3D access during teleport loading screens
 extern ULONGLONG g_TeleportCooldown;
 
 // --- MEMORY SAFETY ---
@@ -55,4 +53,7 @@ public:
     static void Shutdown();
     static void AttachPlayerHooks();
     static SDK::APalPlayerCharacter* GetLocalPlayerSafe();
+
+    // [NEW] Manual Player Selection
+    static void SetManualPlayer(SDK::APalPlayerCharacter* pTarget);
 };

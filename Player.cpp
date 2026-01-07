@@ -8,25 +8,55 @@
 
 namespace Player
 {
-    // --- DEFAULTS ---
     bool bAttackMultiplier = false;
     float fAttackModifier = 2.0f;
-
     bool bWeightAdjuster = false;
     float fWeightModifier = 50000.0f;
-
     bool bUnlockMap = false;
     bool bUnlockTowers = false;
     bool bCollectRelics = false;
 
-    // --- STATE ---
     std::vector<SDK::APalLevelObjectObtainable*> g_RelicCache;
     ULONGLONG g_LastCollectTime = 0;
     const ULONGLONG COLLECTION_INTERVAL_MS = 250;
-
     std::unordered_map<std::string, SDK::UFunction*> g_PlayerFuncCache;
 
-    // --- HELPERS ---
+    // [NEW] Implementation of Player Scanner
+    std::vector<PlayerCandidate> GetPlayerCandidates() {
+        std::vector<PlayerCandidate> results;
+        if (!SDK::UObject::GObjects) return results;
+
+        for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
+            SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
+            if (!IsValidObject(Obj)) continue;
+
+            // Check if it's a PalPlayerCharacter
+            if (Obj->IsA(SDK::APalPlayerCharacter::StaticClass())) {
+                SDK::APalPlayerCharacter* Char = static_cast<SDK::APalPlayerCharacter*>(Obj);
+
+                // Ensure it has a controller (valid player)
+                if (IsValidObject(Char->Controller)) {
+                    SDK::AController* PC = Char->Controller;
+                    std::string controllerName = PC->GetName();
+                    std::string displayName = "Unknown";
+
+                    // Try to get PlayerState Name
+                    if (IsValidObject(PC->PlayerState)) {
+                        SDK::FString fName = PC->PlayerState->PlayerNamePrivate; // Or PlayerName depending on SDK
+                        if (fName.IsValid()) {
+                            std::wstring wName = fName.ToWString();
+                            displayName = std::string(wName.begin(), wName.end());
+                        }
+                    }
+
+                    std::string entry = controllerName + " - " + displayName;
+                    results.push_back({ Char, entry });
+                }
+            }
+        }
+        return results;
+    }
+
     bool IsClass(SDK::UObject* Obj, const char* ClassName) {
         if (!IsValidObject(Obj)) return false;
         char nameBuf[256];
@@ -78,26 +108,16 @@ namespace Player
 
     void ProcessAttributes(SDK::APalPlayerCharacter* pLocal)
     {
-        // Attack
         if (bAttackMultiplier && IsValidObject(pLocal->CharacterParameterComponent)) {
             pLocal->CharacterParameterComponent->AttackUp = (int32_t)(50 * fAttackModifier);
         }
 
-        // Weight
         SDK::APlayerController* PC = static_cast<SDK::APlayerController*>(pLocal->Controller);
         if (IsValidObject(PC) && IsValidObject(PC->PlayerState)) {
             SDK::APalPlayerState* pState = static_cast<SDK::APalPlayerState*>(PC->PlayerState);
             if (IsValidObject(pState->InventoryData)) {
                 auto inv = pState->InventoryData;
-
-                if (bWeightAdjuster) {
-                    inv->MaxInventoryWeight = fWeightModifier;
-                }
-                else {
-                    // [FIX] Reset to default if disabled
-                    // Only reset if it looks modified (e.g. > 5000) to avoid spamming
-                    if (inv->MaxInventoryWeight > 5000.0f) inv->MaxInventoryWeight = 500.0f;
-                }
+                if (bWeightAdjuster) inv->MaxInventoryWeight = fWeightModifier;
             }
         }
     }
@@ -114,7 +134,7 @@ namespace Player
             GetNameSafe(Obj, nameBuf, sizeof(nameBuf));
             if (strstr(nameBuf, "PalGameSetting") && !strstr(nameBuf, "Default__")) {
                 SDK::UPalGameSetting* pSettings = static_cast<SDK::UPalGameSetting*>(Obj);
-                pSettings->worldmapUIMaskClearSize = 99999.0f; // Max out clear radius
+                pSettings->worldmapUIMaskClearSize = 99999.0f;
             }
         }
         std::cout << "[Jarvis] Map revealed." << std::endl;
@@ -125,18 +145,14 @@ namespace Player
         if (!SDK::UObject::GObjects) return;
         std::cout << "[Jarvis] Unlocking Fast Travel..." << std::endl;
 
-        SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
-        if (!IsValidObject(PalPC) || !IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
-
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
 
             if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
                 auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
-                // [FIX] Only unlock if currently locked
                 if (!FT->bUnlocked) {
-                    PalPC->Transmitter->Player->RequestUnlockFastTravelPoint_ToServer(FT->FastTravelPointID);
+                    FT->OnTriggerInteract(pLocal, SDK::EPalInteractiveObjectIndicatorType::UnlockFastTravel);
                 }
             }
         }
@@ -150,7 +166,6 @@ namespace Player
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(pLocal->Controller);
         if (!IsValidObject(PalPC) || !IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
-        // Build Cache
         if (g_RelicCache.empty()) {
             if (SDK::UObject::GObjects) {
                 for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
@@ -166,7 +181,6 @@ namespace Player
             if (g_RelicCache.empty()) { bCollectRelics = false; return; }
         }
 
-        // Collect One
         auto it = g_RelicCache.begin();
         if (it != g_RelicCache.end()) {
             SDK::APalLevelObjectObtainable* Relic = *it;

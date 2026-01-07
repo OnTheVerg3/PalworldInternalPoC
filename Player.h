@@ -1,28 +1,31 @@
 #pragma once
 #include "SDKGlobal.h"
+#include <vector>
+#include <string>
 
 namespace Player
 {
-    // --- CONFIGURATION ---
+    // [NEW] Struct for UI List
+    struct PlayerCandidate {
+        SDK::APalPlayerCharacter* Ptr;
+        std::string DisplayString; // "ControllerName - PlayerName"
+    };
+
+    // [NEW] Scans for all valid player characters
+    std::vector<PlayerCandidate> GetPlayerCandidates();
+
     extern bool bAttackMultiplier;
     extern float fAttackModifier;
-
     extern bool bWeightAdjuster;
     extern float fWeightModifier;
-
     extern bool bUnlockMap;
     extern bool bUnlockTowers;
     extern bool bCollectRelics;
 
-    // --- INTERFACE ---
     void Update(SDK::APalPlayerCharacter* pLocal);
-
-    // [NEW] Wipes cache on world transition
-    void Reset();
-
-    // --- INTERNAL HELPERS ---
     void ProcessAttributes(SDK::APalPlayerCharacter* pLocal);
     void UnlockAllMap(SDK::APalPlayerCharacter* pLocal);
     void UnlockAllTowers(SDK::APalPlayerCharacter* pLocal);
     void TeleportRelicsToPlayer(SDK::APalPlayerCharacter* pLocal);
+    void Reset();
 }

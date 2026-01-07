@@ -9,9 +9,12 @@
 #include "imgui_style.h"
 
 static int selectedTab = 0;
+// [NEW] Local cache for player list
+static std::vector<Player::PlayerCandidate> g_PlayerList;
+static int g_SelectedPlayerIdx = -1;
 
 void Menu::InitTheme() { SetupImGuiStyle(); }
-void Menu::Reset() { selectedTab = 0; }
+void Menu::Reset() { selectedTab = 0; g_PlayerList.clear(); g_SelectedPlayerIdx = -1; }
 
 void Menu::Draw() {
     const char* menuItems[] = { "Player", "Weapons", "Visuals", "Spawner", "Teleporter", "Settings" };
@@ -35,8 +38,39 @@ void Menu::Draw() {
 
         switch (selectedTab) {
         case 0: // PLAYER
+            // [NEW] Player Selection UI
+            ColoredSeparatorText("Target Selector", ImVec4(1, 0.5f, 0.0f, 1));
+
+            if (ImGui::Button("Refresh Players", ImVec2(-1, 30))) {
+                g_PlayerList = Player::GetPlayerCandidates();
+                g_SelectedPlayerIdx = -1;
+            }
+
+            if (!g_PlayerList.empty()) {
+                std::string preview = (g_SelectedPlayerIdx >= 0) ? g_PlayerList[g_SelectedPlayerIdx].DisplayString : "Select Player...";
+                if (ImGui::BeginCombo("##PlayerSelect", preview.c_str())) {
+                    for (int i = 0; i < g_PlayerList.size(); i++) {
+                        bool isSelected = (g_SelectedPlayerIdx == i);
+                        if (ImGui::Selectable(g_PlayerList[i].DisplayString.c_str(), isSelected)) {
+                            g_SelectedPlayerIdx = i;
+                            // Trigger Re-Hook Logic
+                            Hooking::SetManualPlayer(g_PlayerList[i].Ptr);
+                        }
+                        if (isSelected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+            else {
+                ImGui::TextDisabled("No players found. Click Refresh.");
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
             ColoredSeparatorText("Character Stats", ImVec4(1, 1, 1, 1));
             ImGui::Checkbox("Infinite Stamina", &Features::bInfiniteStamina);
+            ImGui::Spacing();
             ImGui::Checkbox("Attack Multiplier", &Player::bAttackMultiplier);
             if (Player::bAttackMultiplier) {
                 ImGui::SameLine(); ImGui::SetNextItemWidth(150);
@@ -109,7 +143,7 @@ void Menu::Draw() {
 
         case 5: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 3.4 (Jarvis)");
+            ImGui::Text("Version 3.5 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
             break;
         }

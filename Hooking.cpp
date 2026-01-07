@@ -38,6 +38,9 @@ ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 HWND g_window = nullptr;
 
+// [NEW] Manual Player Override
+SDK::APalPlayerCharacter* g_ManualPlayer = nullptr;
+
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
 Present oPresent;
 WNDPROC oWndProc;
@@ -82,11 +85,11 @@ __declspec(noinline) void PerformWorldExit() {
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
-    // [FIX] Reset Teleporter state to prevent main menu stutters
     g_TeleportCooldown = 0;
     Teleporter::Reset();
 
     if (g_mainRenderTargetView) { g_mainRenderTargetView->Release(); g_mainRenderTargetView = nullptr; }
+
     g_HookMutex.lock();
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
@@ -95,13 +98,34 @@ __declspec(noinline) void PerformWorldExit() {
     g_pController = nullptr;
     g_pParam = nullptr;
     g_LastLocalPlayer = nullptr;
+    // Note: We do NOT clear g_ManualPlayer here, we want to try to re-hook it if it still exists.
+    // If it's dead, IsValidObject will fail next frame anyway.
+
     Features::Reset();
     Player::Reset();
     Menu::Reset();
     g_HookMutex.unlock();
+
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
     std::cout << "[Jarvis] World Exit Clean." << std::endl;
+}
+
+// [NEW] Manual Player Setter
+void Hooking::SetManualPlayer(SDK::APalPlayerCharacter* pTarget) {
+    if (!IsValidObject(pTarget)) return;
+
+    std::cout << "[Jarvis] Manual Player Selected: " << pTarget->GetName() << std::endl;
+
+    // Force unhook everything first
+    PerformWorldExit();
+
+    // Set override
+    g_ManualPlayer = pTarget;
+
+    // Reset timers to allow immediate re-hook
+    g_ExitCooldown = 0;
+    g_TimePlayerDetected = 0; // Let stabilization logic run for the new target
 }
 
 __declspec(noinline) void CheckForExit(SDK::UObject* pObject, const char* name) {
@@ -153,11 +177,9 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
     __try {
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
 
-        // [FIX] Unconditionally process queue. Do not check if pObject == g_pLocal.
-        // We rely on IsValidObject(pLocal) inside ProcessQueue to ensure safety.
-        Teleporter::ProcessQueue_GameThread();
-
-        if (pObject == g_pLocal) Visuals::Update();
+        if (g_bIsSafe) {
+            Teleporter::ProcessQueue_GameThread();
+        }
 
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
@@ -173,12 +195,24 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
 SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
     __try {
+        // [FIX] Priority: Manual Selection
+        if (g_ManualPlayer && IsValidObject(g_ManualPlayer)) {
+            return g_ManualPlayer;
+        }
+
+        // Default: Auto-Detect
         if (!SDK::pGWorld || !*SDK::pGWorld) return nullptr;
-        SDK::UGameInstance* pGI = (*SDK::pGWorld)->OwningGameInstance;
+        SDK::UWorld* pWorld = *SDK::pGWorld;
+        if (!IsValidObject(pWorld)) return nullptr;
+        SDK::UGameInstance* pGI = pWorld->OwningGameInstance;
         if (!IsValidObject(pGI) || pGI->LocalPlayers.Num() <= 0) return nullptr;
         SDK::ULocalPlayer* LP = pGI->LocalPlayers[0];
         if (!IsValidObject(LP) || !LP->PlayerController) return nullptr;
-        return static_cast<SDK::APalPlayerCharacter*>(LP->PlayerController->Pawn);
+        SDK::APlayerController* PC = LP->PlayerController;
+        if (!IsValidObject(PC)) return nullptr;
+        SDK::APawn* pPawn = PC->Pawn;
+        if (!IsValidObject(pPawn)) return nullptr;
+        return static_cast<SDK::APalPlayerCharacter*>(pPawn);
     }
     __except (1) { return nullptr; }
 }
@@ -187,15 +221,17 @@ void AttachPlayerHooks_Logic() {
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) return;
     if (pLocal != g_LastLocalPlayer) {
-        std::cout << "[System] Attaching VMT Hooks..." << std::endl;
+        std::cout << "[System] Attaching VMT Hooks to: " << pLocal->GetName() << std::endl;
         g_HookMutex.lock();
         Features::Reset(); Player::Reset();
         g_pLocal = pLocal;
         g_pController = pLocal->Controller;
         g_pParam = pLocal->CharacterParameterComponent;
+
         if (g_PawnHook.Init(pLocal)) g_PawnHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
         if (IsValidObject(g_pController) && g_ControllerHook.Init(g_pController)) g_ControllerHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
         if (IsValidObject(g_pParam) && g_ParamHook.Init(g_pParam)) g_ParamHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
+
         g_LastLocalPlayer = pLocal;
         g_HookMutex.unlock();
     }
