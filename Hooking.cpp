@@ -38,7 +38,7 @@ ID3D11DeviceContext* g_pd3dContext = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
 HWND g_window = nullptr;
 
-// [NEW] Manual Player Override
+// Manual Player Override
 SDK::APalPlayerCharacter* g_ManualPlayer = nullptr;
 
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
@@ -98,8 +98,9 @@ __declspec(noinline) void PerformWorldExit() {
     g_pController = nullptr;
     g_pParam = nullptr;
     g_LastLocalPlayer = nullptr;
-    // Note: We do NOT clear g_ManualPlayer here, we want to try to re-hook it if it still exists.
-    // If it's dead, IsValidObject will fail next frame anyway.
+
+    // Clear manual player on full exit so we don't stick to a dead pointer
+    g_ManualPlayer = nullptr;
 
     Features::Reset();
     Player::Reset();
@@ -111,21 +112,37 @@ __declspec(noinline) void PerformWorldExit() {
     std::cout << "[Jarvis] World Exit Clean." << std::endl;
 }
 
-// [NEW] Manual Player Setter
+// [FIX] Soft Transition for Player Switching
 void Hooking::SetManualPlayer(SDK::APalPlayerCharacter* pTarget) {
     if (!IsValidObject(pTarget)) return;
 
-    std::cout << "[Jarvis] Manual Player Selected: " << pTarget->GetName() << std::endl;
+    std::cout << "[Jarvis] Switching to Manual Player: " << pTarget->GetName() << std::endl;
 
-    // Force unhook everything first
-    PerformWorldExit();
+    g_HookMutex.lock();
 
-    // Set override
+    // 1. Restore old hooks (Unhook current)
+    g_PawnHook.Restore();
+    g_ControllerHook.Restore();
+    g_ParamHook.Restore();
+
+    // 2. Clear current cache
+    g_pLocal = nullptr;
+    g_pController = nullptr;
+    g_pParam = nullptr;
+    g_LastLocalPlayer = nullptr; // Force re-detection logic to run
+
+    // 3. Set the new manual target
     g_ManualPlayer = pTarget;
 
-    // Reset timers to allow immediate re-hook
-    g_ExitCooldown = 0;
-    g_TimePlayerDetected = 0; // Let stabilization logic run for the new target
+    // 4. Reset features (state might be invalid for new player)
+    Features::Reset();
+    Player::Reset();
+
+    g_HookMutex.unlock();
+
+    // Note: We DO NOT release D3D resources here.
+    // The next Present_Logic() call will see g_LastLocalPlayer is null, 
+    // pick up the new g_ManualPlayer, and attach hooks normally.
 }
 
 __declspec(noinline) void CheckForExit(SDK::UObject* pObject, const char* name) {
