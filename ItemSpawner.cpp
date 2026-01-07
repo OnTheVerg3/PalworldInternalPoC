@@ -65,7 +65,7 @@ SDK::UPalPlayerInventoryData* GetInventory(SDK::APalPlayerCharacter* pLocal) {
     return State->InventoryData;
 }
 
-// --- SPAWN METHODS (Namespace Scoped) ---
+// --- SPAWN METHODS ---
 
 void ItemSpawner::Spawn_Method1(SDK::APalPlayerCharacter* pLocal, const char* ItemID, int32_t Count) {
     auto InvData = GetInventory(pLocal);
@@ -82,7 +82,7 @@ void ItemSpawner::Spawn_Method1(SDK::APalPlayerCharacter* pLocal, const char* It
         params.Dur = 0.0f;
 
         InvData->ProcessEvent(fn, &params);
-        std::cout << "[Jarvis] Method 1 Sent." << std::endl;
+        std::cout << "[Jarvis] Method 1 Sent: " << ItemID << std::endl;
     }
 }
 
@@ -98,7 +98,7 @@ void ItemSpawner::Spawn_Method2(SDK::APalPlayerCharacter* pLocal, const char* It
     // 2. Find Container & Slot
     SDK::UPalItemContainer* Container = nullptr;
     if (!InvData->TryGetContainerFromStaticItemID(ItemName, &Container) || !Container) {
-        std::cout << "[-] Container resolution failed. Item ID may be invalid for this inventory." << std::endl;
+        std::cout << "[-] Container resolution failed." << std::endl;
         return;
     }
 
@@ -114,9 +114,7 @@ void ItemSpawner::Spawn_Method2(SDK::APalPlayerCharacter* pLocal, const char* It
     InvData->AddItem_ServerInternal(ItemName, Count, true, 0.0f);
 
     // 4. Client Override (Clean + Set)
-    // [FIX] Ensuring the slot is technically "empty" before forcing new ID helps avoid ghosting
     Slot->StackCount = 0;
-
     Slot->ItemId.StaticId = ItemName;
     Slot->StackCount = Count;
 
@@ -132,10 +130,34 @@ void ItemSpawner::Spawn_Method2(SDK::APalPlayerCharacter* pLocal, const char* It
         Froms.Add({ SlotId, Count });
 
         PalPC->Transmitter->Item->RequestMove_ToServer(RequestID, SlotId, Froms);
-        std::cout << "[Jarvis] Method 2 (Sync) Sent." << std::endl;
+        std::cout << "[Jarvis] Method 2 (Sync) Sent: " << ItemID << std::endl;
     }
 
     InvData->RequestForceMarkAllDirty_ToServer(true);
+}
+
+// --- PINNING SYSTEM ---
+struct PinnedEntry {
+    std::string Name;
+    std::string ID;
+};
+static std::vector<PinnedEntry> g_PinnedItems;
+
+void TogglePin(const std::string& name, const std::string& id) {
+    auto it = std::find_if(g_PinnedItems.begin(), g_PinnedItems.end(),
+        [&](const PinnedEntry& e) { return e.ID == id; });
+
+    if (it != g_PinnedItems.end()) {
+        g_PinnedItems.erase(it);
+    }
+    else {
+        g_PinnedItems.push_back({ name, id });
+    }
+}
+
+bool IsPinned(const std::string& id) {
+    return std::any_of(g_PinnedItems.begin(), g_PinnedItems.end(),
+        [&](const PinnedEntry& e) { return e.ID == id; });
 }
 
 // --- UI STATE ---
@@ -146,14 +168,48 @@ static char manualIdBuffer[64] = "PalSphere";
 static int itemQty = 1;
 
 void ItemSpawner::DrawTab() {
-    ImGui::SetNextItemWidth(-1);
-    ImGui::InputTextWithHint("##Search", "Search items...", searchBuffer, sizeof(searchBuffer));
+    // Get Local Player First (Needed for direct spawn buttons)
+    auto pLocal = Hooking::GetLocalPlayerSafe();
 
+    // --- PINNED ITEMS SECTION ---
+    if (!g_PinnedItems.empty()) {
+        ColoredSeparatorText("Favorites", ImVec4(1.0f, 0.84f, 0.0f, 1.0f)); // Gold Color
+        if (ImGui::BeginChild("PinnedArea", ImVec2(0, 100), true)) {
+            for (const auto& item : g_PinnedItems) {
+                ImGui::PushID(item.ID.c_str());
+
+                // Spawn Buttons
+                if (ImGui::Button("SP")) { if (pLocal) Spawn_Method1(pLocal, item.ID.c_str(), itemQty); }
+                ImGui::SameLine();
+                if (ImGui::Button("MP")) { if (pLocal) Spawn_Method2(pLocal, item.ID.c_str(), itemQty); }
+
+                ImGui::SameLine();
+
+                // Selectable Name (Click to fill buffer)
+                if (ImGui::Selectable(item.Name.c_str(), false, 0, ImVec2(200, 0))) {
+                    strcpy_s(manualIdBuffer, item.ID.c_str());
+                }
+
+                // Unpin Menu
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem("Unpin")) TogglePin(item.Name, item.ID);
+                    ImGui::EndPopup();
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+        ImGui::Spacing();
+    }
+
+    // --- MAIN SEARCH ---
+    ImGui::SetNextItemWidth(-1);
+    ImGui::InputTextWithHint("##Search", "Search items (Right-click to Pin)...", searchBuffer, sizeof(searchBuffer));
     ImGui::Spacing();
 
-    // [FIX] Restored Category/Item List Logic
+    // --- ITEM LIST ---
     if (strlen(searchBuffer) > 0) {
-        // Search Results Mode
+        // Search Results
         ImGui::BeginChild("SearchResults", ImVec2(0, -60), true);
         std::string filter = searchBuffer;
         for (const auto& cat : Database::Categories) {
@@ -168,8 +224,16 @@ void ItemSpawner::DrawTab() {
                 );
 
                 if (it != itemName.end()) {
-                    if (ImGui::Selectable(item.Name, false)) {
+                    bool pinned = IsPinned(item.ID);
+                    std::string label = std::string(item.Name) + (pinned ? " *" : "");
+
+                    if (ImGui::Selectable(label.c_str())) {
                         strcpy_s(manualIdBuffer, item.ID);
+                    }
+
+                    if (ImGui::BeginPopupContextItem()) {
+                        if (ImGui::MenuItem(pinned ? "Unpin Item" : "Pin Item")) TogglePin(item.Name, item.ID);
+                        ImGui::EndPopup();
                     }
                 }
             }
@@ -177,7 +241,7 @@ void ItemSpawner::DrawTab() {
         ImGui::EndChild();
     }
     else {
-        // Category Browser Mode
+        // Categories Layout
         ImGui::Columns(2, "SpawnerColumns", true);
         ImGui::SetColumnWidth(0, 160.0f);
 
@@ -196,9 +260,17 @@ void ItemSpawner::DrawTab() {
         if (selectedCategoryIdx >= 0 && selectedCategoryIdx < Database::Categories.size()) {
             const auto& items = Database::Categories[selectedCategoryIdx].Items;
             for (int i = 0; i < items.size(); i++) {
-                if (ImGui::Selectable(items[i].Name, selectedItemIdx == i)) {
+                bool pinned = IsPinned(items[i].ID);
+                std::string label = std::string(items[i].Name) + (pinned ? " *" : "");
+
+                if (ImGui::Selectable(label.c_str(), selectedItemIdx == i)) {
                     selectedItemIdx = i;
                     strcpy_s(manualIdBuffer, items[i].ID);
+                }
+
+                if (ImGui::BeginPopupContextItem()) {
+                    if (ImGui::MenuItem(pinned ? "Unpin Item" : "Pin Item")) TogglePin(items[i].Name, items[i].ID);
+                    ImGui::EndPopup();
                 }
             }
         }
@@ -207,12 +279,20 @@ void ItemSpawner::DrawTab() {
     }
 
     ImGui::Separator();
-    ImGui::PushItemWidth(120); ImGui::InputInt("##Amount", &itemQty); if (itemQty < 1) itemQty = 1; ImGui::PopItemWidth();
-    ImGui::SameLine();
-    ImGui::PushItemWidth(200); ImGui::InputText("##ManualID", manualIdBuffer, sizeof(manualIdBuffer)); ImGui::PopItemWidth();
+
+    // --- CONTROL BAR ---
+    ImGui::PushItemWidth(120);
+    ImGui::InputInt("##Amount", &itemQty);
+    if (itemQty < 1) itemQty = 1;
+    ImGui::PopItemWidth();
+
     ImGui::SameLine();
 
-    auto pLocal = Hooking::GetLocalPlayerSafe();
+    ImGui::PushItemWidth(200);
+    ImGui::InputText("##ManualID", manualIdBuffer, sizeof(manualIdBuffer));
+    ImGui::PopItemWidth();
+
+    ImGui::SameLine();
 
     if (CustomButton("SPAWN (SP)", ImVec2(100, 30), false)) {
         if (pLocal) ItemSpawner::Spawn_Method1(pLocal, manualIdBuffer, itemQty);
