@@ -5,6 +5,7 @@
 #include <vector>
 #include <iostream>
 #include <cstdint>
+#include <string> // [FIX] Added for std::wstring
 
 // Undefine conflicting macros
 #ifdef DrawText
@@ -90,5 +91,31 @@ namespace SDK {
         if (!pLocalPlayer || !pLocalPlayer->PlayerController) return nullptr;
         APawn* pPawn = pLocalPlayer->PlayerController->Pawn;
         return static_cast<APalPlayerCharacter*>(pPawn);
+    }
+
+    // [NEW] Helper to execute console commands (FOV, Gamma, etc.)
+    inline void ExecuteConsoleCommand(const std::string& Command) {
+        if (!pGWorld || !*pGWorld) return;
+
+        static UFunction* fn = nullptr;
+        if (!fn) fn = UObject::FindObject<UFunction>("Function Engine.KismetSystemLibrary.ExecuteConsoleCommand");
+
+        if (fn) {
+            // Need to convert std::string to FString manually
+            std::wstring wCommand(Command.begin(), Command.end());
+            FString fCommand(wCommand.c_str());
+
+            struct {
+                UObject* WorldContextObject;
+                FString Command;
+                APlayerController* SpecificPlayer;
+            } params;
+
+            params.WorldContextObject = *pGWorld;
+            params.Command = fCommand;
+            params.SpecificPlayer = nullptr;
+
+            UObject::GetDefaultObj(UKismetSystemLibrary::StaticClass())->ProcessEvent(fn, &params);
+        }
     }
 }

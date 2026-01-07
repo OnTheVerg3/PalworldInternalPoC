@@ -4,12 +4,10 @@
 #include "ItemSpawner.h"
 #include "Player.h"
 #include "Teleporter.h"
+#include "Visuals.h" // [NEW] Include Visuals
 #include "SDKGlobal.h"
 #include "imgui_style.h"
 
-// [FIX] Removed duplicate definition. Now uses extern from Hooking.h
-
-// Static internal state
 static int selectedTab = 0;
 
 void Menu::InitTheme() {
@@ -46,70 +44,62 @@ void Menu::Draw() {
         switch (selectedTab) {
         case 0: // PLAYER
             ColoredSeparatorText("Character Stats", ImVec4(1, 1, 1, 1));
-
             ImGui::Checkbox("Infinite Stamina", &Features::bInfiniteStamina);
             ImGui::Spacing();
-
             ImGui::Checkbox("Attack Multiplier", &Player::bAttackMultiplier);
             if (Player::bAttackMultiplier) {
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(150);
                 ImGui::SliderFloat("##AttackMod", &Player::fAttackModifier, 1.0f, 100.0f, "%.1fx");
             }
-
             ImGui::Checkbox("Weight Adjuster", &Player::bWeightAdjuster);
             if (Player::bWeightAdjuster) {
                 ImGui::SameLine();
                 ImGui::SetNextItemWidth(150);
                 ImGui::InputFloat("##WeightMod", &Player::fWeightModifier, 1000.0f, 10000.0f, "%.0f");
             }
-
             ImGui::Spacing();
             ColoredSeparatorText("World Interaction", ImVec4(0.3f, 1.0f, 0.3f, 1));
-
-            if (ImGui::Button("Reveal Map (Fog of War)", ImVec2(200, 30))) {
-                Player::bUnlockMap = true;
-            }
-
-            if (ImGui::Button("Unlock All Fast Travel", ImVec2(200, 30))) {
-                Player::bUnlockTowers = true;
-            }
-
-            if (ImGui::Button("Vacuum Relics (Lifemunks)", ImVec2(200, 30))) {
-                Player::bCollectRelics = true;
-            }
+            if (ImGui::Button("Reveal Map (Fog of War)", ImVec2(200, 30))) Player::bUnlockMap = true;
+            if (ImGui::Button("Unlock All Fast Travel", ImVec2(200, 30))) Player::bUnlockTowers = true;
+            if (ImGui::Button("Vacuum Relics (Lifemunks)", ImVec2(200, 30))) Player::bCollectRelics = true;
             break;
 
         case 1: // WEAPONS
             ColoredSeparatorText("Ammo Management", ImVec4(1, 1, 1, 1));
-
             if (ImGui::Checkbox("Infinite Ammo (Inventory)", &Features::bInfiniteAmmo)) {
                 if (Features::bInfiniteAmmo) Features::bInfiniteMagazine = false;
             }
-
             if (ImGui::Checkbox("Infinite Magazine (Clip)", &Features::bInfiniteMagazine)) {
                 if (Features::bInfiniteMagazine) Features::bInfiniteAmmo = false;
             }
-
             ImGui::Spacing();
             ColoredSeparatorText("Weapon Properties", ImVec4(1, 1, 1, 1));
-
             ImGui::Checkbox("Rapid Fire", &Features::bRapidFire);
             ImGui::Checkbox("No Recoil & Spread", &Features::bNoRecoil);
             ImGui::Checkbox("Infinite Durability", &Features::bInfiniteDurability);
-
             ImGui::Spacing();
             ColoredSeparatorText("Damage", ImVec4(1, 0.3f, 0.3f, 1));
-
             ImGui::Checkbox("Enable Damage Mod", &Features::bDamageHack);
-            if (Features::bDamageHack) {
-                ImGui::SliderInt("Multiplier", &Features::DamageMultiplier, 1, 100, "%dx");
-            }
+            if (Features::bDamageHack) ImGui::SliderInt("Multiplier", &Features::DamageMultiplier, 1, 100, "%dx");
             break;
 
         case 2: // VISUALS
-            ColoredSeparatorText("ESP", ImVec4(1, 1, 1, 1));
-            ImGui::TextDisabled("Coming Soon...");
+            ColoredSeparatorText("Camera Settings", ImVec4(1, 1, 1, 1));
+
+            if (ImGui::SliderFloat("Field of View (FOV)", &Visuals::fFOV, 60.0f, 140.0f, "%.0f")) {
+                Visuals::Apply();
+            }
+
+            if (ImGui::SliderFloat("Brightness (Gamma)", &Visuals::fGamma, 0.5f, 5.0f, "%.1f")) {
+                Visuals::Apply();
+            }
+
+            if (ImGui::Button("Reset Visuals", ImVec2(150, 30))) {
+                Visuals::fFOV = 90.0f;
+                Visuals::fGamma = 2.2f;
+                Visuals::Apply();
+            }
             break;
 
         case 3: // SPAWNER
@@ -120,9 +110,16 @@ void Menu::Draw() {
         {
             auto pLocal = Hooking::GetLocalPlayerSafe();
 
+            ColoredSeparatorText("Base Teleport", ImVec4(0.3f, 1.0f, 0.3f, 1));
+            // [NEW] Base Teleporter
+            if (ImGui::Button("Teleport to Nearest Base", ImVec2(-1, 35))) {
+                if (pLocal) Teleporter::TeleportToHome(pLocal);
+            }
+
+            ImGui::Spacing();
             ColoredSeparatorText("Custom Waypoints", ImVec4(0.3f, 1.0f, 1.0f, 1));
 
-            static char wpNameBuffer[64] = "My Base";
+            static char wpNameBuffer[64] = "My Point";
             ImGui::InputText("Name", wpNameBuffer, sizeof(wpNameBuffer));
 
             if (ImGui::Button("Save Current Location", ImVec2(-1, 30))) {
@@ -134,38 +131,22 @@ void Menu::Draw() {
 
             for (int i = 0; i < Teleporter::Waypoints.size(); ++i) {
                 ImGui::PushID(i);
-
                 if (ImGui::Button("TP")) {
                     if (pLocal) Teleporter::TeleportTo(pLocal, Teleporter::Waypoints[i].Location);
                 }
-
                 ImGui::SameLine();
-
-                if (ImGui::Button("DEL")) {
-                    Teleporter::DeleteWaypoint(i);
-                }
-
+                if (ImGui::Button("DEL")) Teleporter::DeleteWaypoint(i);
                 ImGui::SameLine();
                 ImGui::Text("%s", Teleporter::Waypoints[i].Name.c_str());
-
                 ImGui::PopID();
             }
-
-            ImGui::Spacing();
-            ColoredSeparatorText("Boss Teleports", ImVec4(1.0f, 0.5f, 0.5f, 1));
-            if (ImGui::Button("Zoe & Grizzbolt")) { if (pLocal) Teleporter::TeleportToBoss(pLocal, 0); }
-            ImGui::SameLine();
-            if (ImGui::Button("Lily & Lyleen")) { if (pLocal) Teleporter::TeleportToBoss(pLocal, 1); }
-
         }
         break;
 
         case 5: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 2.8 (Jarvis)");
-            if (ImGui::Button("Unload Cheat")) {
-                Hooking::Shutdown();
-            }
+            ImGui::Text("Version 2.9 (Jarvis)");
+            if (ImGui::Button("Unload Cheat")) Hooking::Shutdown();
             break;
         }
 

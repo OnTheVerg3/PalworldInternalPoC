@@ -10,11 +10,7 @@ namespace Teleporter
     // --- INTERNAL HELPERS ---
     void CallFn(SDK::UObject* obj, const char* fnName, void* params = nullptr) {
         if (!IsValidObject(obj)) return;
-
-        // [FIX] Removed 'static' to find function dynamically every time.
-        // This is safe for UI actions and prevents stale pointers.
         auto fn = SDK::UObject::FindObject<SDK::UFunction>(fnName);
-
         if (fn) obj->ProcessEvent(fn, params);
     }
 
@@ -29,18 +25,15 @@ namespace Teleporter
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(PC);
         SDK::APalPlayerState* PalState = static_cast<SDK::APalPlayerState*>(PC->PlayerState);
 
-        // 1. Get Network Transmitter
         if (!IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) {
             std::cout << "[-] Teleport Failed: Transmitter invalid." << std::endl;
             return;
         }
         auto* NetworkPlayer = PalPC->Transmitter->Player;
 
-        // 2. Prepare Data
         SDK::FVector SafeLoc = { Location.X, Location.Y, Location.Z + 100.0f };
         SDK::FQuat Rotation = { 0, 0, 0, 1 };
 
-        // 3. Send "Register Respawn Point" Packet
         struct {
             SDK::FGuid PlayerUId;
             SDK::FVector Location;
@@ -52,8 +45,6 @@ namespace Teleporter
         RegisterParams.Rotation = Rotation;
 
         CallFn(NetworkPlayer, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
-
-        // 4. Send "Teleport To Safe Point" Packet
         CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
 
         std::cout << "[Jarvis] Teleport sequence executed." << std::endl;
@@ -79,15 +70,42 @@ namespace Teleporter
         }
     }
 
+    // [NEW] Implemented Base Teleporter
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal)
     {
-        std::cout << "[Jarvis] Home teleport logic pending SDK integration." << std::endl;
+        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
+
+        std::cout << "[Jarvis] Scanning for Base Camp..." << std::endl;
+
+        // Iterate GObjects to find a Base Camp Point
+        for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
+            SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
+            if (!IsValidObject(Obj)) continue;
+
+            // We look for the Level Object representing the center of a base
+            if (Obj->IsA(SDK::APalLevelObjectBaseCampPoint::StaticClass())) {
+                SDK::APalLevelObjectBaseCampPoint* BasePoint = static_cast<SDK::APalLevelObjectBaseCampPoint*>(Obj);
+
+                // Teleport to the first one we find.
+                // In singleplayer/co-op, this is usually your base.
+                // In servers, this might be ANY base loaded in memory.
+                SDK::FVector BaseLoc = BasePoint->K2_GetActorLocation();
+
+                // Add a small offset Z to avoid falling through floor
+                BaseLoc.Z += 150.0f;
+
+                std::cout << "[Jarvis] Base found. Teleporting..." << std::endl;
+                TeleportTo(pLocal, BaseLoc);
+                return; // Stop after first one
+            }
+        }
+        std::cout << "[-] No Base Camp found in range." << std::endl;
     }
 
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex)
     {
         static const struct { const char* Name; SDK::FVector Loc; } Bosses[] = {
-            { "Zoe & Grizzbolt", { 1234.0f, 5678.0f, 0.0f } },
+            { "Zoe & Grizzbolt", { 1234.0f, 5678.0f, 0.0f } }, // Needs real coords
             { "Lily & Lyleen",   { 0.0f, 0.0f, 0.0f } }
         };
 
