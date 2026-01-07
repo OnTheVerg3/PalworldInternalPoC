@@ -425,7 +425,12 @@ namespace Database {
             { "Blueprint Core Eject Shotgun(Uncommon)", "Blueprint_OctaviaShotgun_2" },
             { "Blueprint Core Eject Shotgun(Rare)", "Blueprint_OctaviaShotgun_3" },
             { "Blueprint Core Eject Shotgun(Epic)", "Blueprint_OctaviaShotgun_4" },
-            { "Blueprint Core Eject Shotgun(Legendary)", "Blueprint_OctaviaShotgun_5" }
+            { "Blueprint Core Eject Shotgun(Legendary)", "Blueprint_OctaviaShotgun_5" },
+            { "Blueprint Flamethrower(Uncommon)", "Blueprint_FlameThrower_2" },
+            { "Blueprint Flamethrower(Rare)", "Blueprint_FlameThrower_3" },
+            { "Blueprint Flamethrower(Epic)", "Blueprint_FlameThrower_4" },
+            { "Blueprint Flamethrower(Legendary)", "Blueprint_FlameThrower_5" },
+            { "Blueprint Advanced Fishing Rod (Depresso)(Rare)", "Blueprint_FishingRod_03_2" }
         }},
         { "Crafting Materials", {
             { "Ancient Civilization Parts", "PalCrystal_Ex" },
@@ -707,7 +712,7 @@ namespace Database {
             { "Holy Hood (Legendary)", "YakushimaHeadEquip004_4" },
             { "Holy Hood (Mythic)", "YakushimaHeadEquip004_5" },
             { "Moon Lord Mask (Legendary)", "YakushimaHeadEquip005" },
-            { "Eye of Cthulhu Mask (Epic)", "YakushimaHeadEquip006" }
+            { "Eye of Cthulhu Mask (Epic)", "YakushimaHeadEquip006" },
         }},
         { "Medicine", {
             { "High Grade Medical Supplies", "LuxuryMedicines" },
@@ -802,7 +807,8 @@ namespace Database {
             { "Mega Grappling Gun", "GrapplingGun2" },
             { "Giga Grappling Gun", "GrapplingGun3" },
             { "Hyper Grappling Gun", "GrapplingGun4" },
-            { "Super Grappling Gun", "GrapplingGun5" }
+            { "Super Grappling Gun", "GrapplingGun5" },
+            { "Advanced Fishing Rod (Depresso)", "FishingRod_03_2" }
         }},
         { "Weapons", {
             { "Assault Rifle(Common)", "AssaultRifle_Default1" },
@@ -828,6 +834,7 @@ namespace Database {
             { "Five Shot Bow", "Bow_Fifth" },
             { "Fire Bow", "Bow_Fire" },
             { "Frag Grenade", "FragGrenade" },
+            { "Frag Grenade Mk2", "FragGrenade_Super" },
             { "Homing Sphere Launcher", "HomingSphereLauncher" },
             { "Incendiary Grenade", "FragGrenade_Fire" },
             { "Ice Grenade", "FragGrenade_Ice" },
@@ -932,7 +939,8 @@ namespace Database {
             { "Vortex Beater (Mythic)", "YakushimaGun001_5" },
             { "Marksman Revolver", "OctaviaRevolver" },
             { "Core Eject Shotgun", "OctaviaShotgun" },
-            { "Nightglow", "YakushimaLantern001" }
+            { "Nightglow", "YakushimaLantern001" },
+            { "Flamethrower", "FlameThrower" }
         }},
         { "Money", {
             { "Diamond", "Diamond" },
