@@ -76,7 +76,7 @@ void Menu::Draw() {
             ImGui::Checkbox("No Durability Loss", &Features::bInfiniteDurability);
             ImGui::Spacing();
             ImGui::Checkbox("Damage Mod", &Features::bDamageHack);
-            if (Features::bDamageHack) { ImGui::SameLine(); ImGui::SliderInt("##DmgMult", &Features::DamageMultiplier, 1, 100, "%dx"); }
+            if (Features::bDamageHack) { ImGui::SameLine(); ImGui::SliderInt("##DmgMult", &Features::DamageMultiplier, 1, 1000, "%dx"); }
             break;
 
         case 2: // SPAWNER
