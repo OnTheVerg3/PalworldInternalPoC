@@ -20,10 +20,7 @@
 
 // --- HOOK DEFINITIONS ---
 typedef HRESULT(__stdcall* Present) (IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags);
-typedef HRESULT(__stdcall* ResizeBuffers)(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags);
-
 Present oPresent;
-ResizeBuffers oResizeBuffers;
 WNDPROC oWndProc;
 
 // --- GLOBALS ---
@@ -31,7 +28,7 @@ VMTHook g_PawnHook;
 VMTHook g_ControllerHook;
 VMTHook g_ParamHook;
 
-// [FIX] Recursive Mutex prevents deadlock when calling SetManualPlayer from Menu
+// Recursive to prevent deadlocks in UI callbacks
 std::recursive_mutex g_HookMutex;
 
 SDK::APalPlayerCharacter* g_pLocal = nullptr;
@@ -94,6 +91,12 @@ __declspec(noinline) void PerformWorldExit() {
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
+    // Release RTV if held (safety net)
+    if (g_mainRenderTargetView) {
+        g_mainRenderTargetView->Release();
+        g_mainRenderTargetView = nullptr;
+    }
+
     g_HookMutex.lock();
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
@@ -118,7 +121,6 @@ void Hooking::SetManualPlayer(SDK::APalPlayerCharacter* pTarget) {
     if (!IsValidObject(pTarget)) return;
     std::cout << "[Jarvis] Manual Switch: " << pTarget->GetName() << std::endl;
 
-    // [FIX] Recursive mutex allows this lock to succeed even if called from Menu::Draw
     g_HookMutex.lock();
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
@@ -176,11 +178,6 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
 
     __try {
         if (IsGarbagePtr(pObject) || IsGarbagePtr(pFunction)) return oFunc(pObject, pFunction, pParams);
-
-        // [FIX] Execute Queued Teleports on the Game Thread
-        if (g_bIsSafe) {
-            Teleporter::ProcessQueue();
-        }
 
         char name[256];
         GetNameSafe(pFunction, name, sizeof(name));
@@ -242,52 +239,81 @@ void Present_Logic() {
     g_HookMutex.unlock();
 }
 
-HRESULT __stdcall hkResizeBuffers(IDXGISwapChain* pSwapChain, UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat, UINT SwapChainFlags) {
-    if (g_mainRenderTargetView) {
-        if (g_pd3dContext) g_pd3dContext->OMSetRenderTargets(0, 0, 0);
-        g_mainRenderTargetView->Release();
-        g_mainRenderTargetView = nullptr;
-    }
-    return oResizeBuffers(pSwapChain, BufferCount, Width, Height, NewFormat, SwapChainFlags);
-}
-
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     if (g_GameBase == 0) InitModuleBounds();
 
+    // 1. Initialize ImGui ONCE
     static bool bInit = false;
     if (!bInit) {
         DXGI_SWAP_CHAIN_DESC sd; pSwapChain->GetDesc(&sd);
         g_window = sd.OutputWindow;
         oWndProc = (WNDPROC)SetWindowLongPtr(g_window, GWLP_WNDPROC, (LONG_PTR)WndProc);
-        ImGui::CreateContext(); ImGui_ImplWin32_Init(g_window); bInit = true;
+
+        if (SUCCEEDED(pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice))) {
+            g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
+            ImGui::CreateContext();
+            ImGui_ImplWin32_Init(g_window);
+            ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dContext); // Called exactly once
+            Menu::InitTheme();
+            bInit = true;
+        }
+        else {
+            return oPresent(pSwapChain, SyncInterval, Flags);
+        }
     }
 
-    if (!g_mainRenderTargetView) {
-        ID3D11Texture2D* pBackBuffer = nullptr;
-        pSwapChain->GetDevice(__uuidof(ID3D11Device), (void**)&g_pd3dDevice);
-        g_pd3dDevice->GetImmediateContext(&g_pd3dContext);
-        pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
+    // 2. Create RTV for this frame
+    ID3D11Texture2D* pBackBuffer = nullptr;
+    pSwapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBackBuffer);
+
+    if (pBackBuffer) {
+        // If creation fails, we skip rendering but don't crash
         if (FAILED(g_pd3dDevice->CreateRenderTargetView(pBackBuffer, NULL, &g_mainRenderTargetView))) {
             pBackBuffer->Release();
             return oPresent(pSwapChain, SyncInterval, Flags);
         }
         pBackBuffer->Release();
     }
+    else {
+        return oPresent(pSwapChain, SyncInterval, Flags);
+    }
 
+    // 3. Logic & Input
     __try { Present_Logic(); }
     __except (1) { g_bIsSafe = false; }
 
-    ImGui_ImplDX11_NewFrame(); ImGui_ImplWin32_NewFrame(); ImGui::NewFrame();
+    // 4. Draw
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
     g_HookMutex.lock();
     if (g_bIsSafe) {
         if (!g_bHasAutoOpened) { g_ShowMenu = true; g_bHasAutoOpened = true; }
-        if (g_ShowMenu) { ImGui::GetIO().MouseDrawCursor = true; Menu::Draw(); }
-        else ImGui::GetIO().MouseDrawCursor = false;
+        if (g_ShowMenu) {
+            ImGui::GetIO().MouseDrawCursor = true;
+            Menu::Draw();
+        }
+        else {
+            ImGui::GetIO().MouseDrawCursor = false;
+        }
     }
     g_HookMutex.unlock();
+
     ImGui::Render();
     g_pd3dContext->OMSetRenderTargets(1, &g_mainRenderTargetView, NULL);
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    // 5. [CRITICAL] Clean Up Immediately
+    // Unbind RTV from context
+    ID3D11RenderTargetView* nullViews[] = { nullptr };
+    g_pd3dContext->OMSetRenderTargets(1, nullViews, nullptr);
+
+    // Release RTV so SwapChain is free to resize/destroy
+    if (g_mainRenderTargetView) {
+        g_mainRenderTargetView->Release();
+        g_mainRenderTargetView = nullptr;
+    }
 
     return oPresent(pSwapChain, SyncInterval, Flags);
 }
@@ -304,12 +330,10 @@ void Hooking::Init() {
     if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, levels, 1, D3D11_SDK_VERSION, &scd, &swap, &dev, NULL, &ctx))) {
         DWORD_PTR* vtable = (DWORD_PTR*)swap; vtable = (DWORD_PTR*)vtable[0];
         void* presentAddr = (void*)vtable[8];
-        void* resizeAddr = (void*)vtable[13];
         swap->Release(); dev->Release(); ctx->Release(); DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
         if (MH_Initialize() == MH_OK) {
             InitModuleBounds();
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);
-            MH_CreateHook(resizeAddr, &hkResizeBuffers, (void**)&oResizeBuffers);
             MH_EnableHook(MH_ALL_HOOKS);
         }
     }

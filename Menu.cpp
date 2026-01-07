@@ -85,7 +85,7 @@ void Menu::Draw() {
         case 2: // VISUALS
             ColoredSeparatorText("Camera", ImVec4(1, 1, 1, 1));
             if (ImGui::SliderFloat("FOV", &Visuals::fFOV, 60.0f, 140.0f, "%.0f")) Visuals::Apply();
-            if (ImGui::SliderFloat("Gamma (Left=Dark)", &Visuals::fGamma, 0.1f, 5.0f, "%.2f")) Visuals::Apply();
+            if (ImGui::SliderFloat("Gamma", &Visuals::fGamma, 0.1f, 5.0f, "%.2f")) Visuals::Apply();
             if (ImGui::Button("Reset", ImVec2(150, 30))) { Visuals::fFOV = 90.0f; Visuals::fGamma = 1.0f; Visuals::Apply(); }
             break;
 
@@ -112,7 +112,6 @@ void Menu::Draw() {
             ImGui::Spacing();
             for (int i = 0; i < Teleporter::Waypoints.size(); ++i) {
                 ImGui::PushID(i);
-                // [FIX] Direct call to TeleportTo
                 if (ImGui::Button("TP")) if (pLocal) Teleporter::TeleportTo(pLocal, Teleporter::Waypoints[i].Location);
                 ImGui::SameLine();
                 if (ImGui::Button("DEL")) Teleporter::DeleteWaypoint(i);
@@ -125,7 +124,7 @@ void Menu::Draw() {
 
         case 5: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 3.6 (Jarvis)");
+            ImGui::Text("Version 3.7 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
             break;
         }
