@@ -80,11 +80,11 @@ void Menu::Draw() {
         case 3: ItemSpawner::DrawTab(); break;
 
         case 4: // TELEPORTER
+        {   // [FIX] Added Scoping Braces to fix C2360
             auto pLocal = Hooking::GetLocalPlayerSafe();
             ColoredSeparatorText("Base & Bosses", ImVec4(0.3f, 1.0f, 0.3f, 1));
             if (ImGui::Button("TP to Base", ImVec2(-1, 30))) if (pLocal) Teleporter::TeleportToHome(pLocal);
 
-            // [FIX] Added all 5 bosses
             if (ImGui::Button("Tower: Zoe & Grizzbolt")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 0);
             if (ImGui::Button("Tower: Lily & Lyleen")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 1);
             if (ImGui::Button("Tower: Axel & Orserk")) if (pLocal) Teleporter::TeleportToBoss(pLocal, 2);
@@ -107,7 +107,8 @@ void Menu::Draw() {
                 ImGui::Text("%s", Teleporter::Waypoints[i].Name.c_str());
                 ImGui::PopID();
             }
-            break;
+        } // [FIX] End Scope
+        break;
 
         case 5: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
