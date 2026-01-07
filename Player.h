@@ -5,17 +5,14 @@
 
 namespace Player
 {
-    // [NEW] Struct for UI List
     struct PlayerCandidate {
         SDK::APalPlayerCharacter* Ptr;
-        std::string DisplayString; // "ControllerName - PlayerName"
+        std::string DisplayString;
     };
 
-    // [NEW] Scans for all valid player characters
     std::vector<PlayerCandidate> GetPlayerCandidates();
 
-    extern bool bAttackMultiplier;
-    extern float fAttackModifier;
+    // [FIX] Removed Attack variables
     extern bool bWeightAdjuster;
     extern float fWeightModifier;
     extern bool bUnlockMap;

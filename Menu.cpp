@@ -14,7 +14,6 @@ void Menu::InitTheme() { SetupImGuiStyle(); }
 void Menu::Reset() { selectedTab = 0; g_PlayerList.clear(); g_SelectedPlayerIdx = -1; }
 
 void Menu::Draw() {
-    // [FIX] Removed Visuals/Teleporter
     const char* menuItems[] = { "Player", "Weapons", "Spawner", "Settings" };
 
     ImGui::SetNextWindowSize(ImVec2(750, 500), ImGuiCond_FirstUseEver);
@@ -59,8 +58,9 @@ void Menu::Draw() {
             ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
             ColoredSeparatorText("Stats & World", ImVec4(1, 1, 1, 1));
             ImGui::Checkbox("Infinite Stamina", &Features::bInfiniteStamina);
-            ImGui::Checkbox("Attack Multiplier", &Player::bAttackMultiplier);
-            if (Player::bAttackMultiplier) { ImGui::SameLine(); ImGui::SetNextItemWidth(150); ImGui::SliderFloat("##AttackMod", &Player::fAttackModifier, 1.0f, 100.0f, "%.1fx"); }
+
+            // [FIX] Removed Attack Multiplier UI
+
             ImGui::Checkbox("Weight Adjuster", &Player::bWeightAdjuster);
             if (Player::bWeightAdjuster) { ImGui::SameLine(); ImGui::SetNextItemWidth(150); ImGui::InputFloat("##WeightMod", &Player::fWeightModifier, 1000.0f, 10000.0f, "%.0f"); }
             ImGui::Spacing();
@@ -76,7 +76,7 @@ void Menu::Draw() {
             ImGui::Checkbox("No Durability Loss", &Features::bInfiniteDurability);
             ImGui::Spacing();
             ImGui::Checkbox("Damage Mod", &Features::bDamageHack);
-            if (Features::bDamageHack) { ImGui::SameLine(); ImGui::SliderInt("##DmgMult", &Features::DamageMultiplier, 1, 1000, "%dx"); }
+            if (Features::bDamageHack) { ImGui::SameLine(); ImGui::SliderInt("##DmgMult", &Features::DamageMultiplier, 1, 100, "%dx"); }
             break;
 
         case 2: // SPAWNER
@@ -85,7 +85,7 @@ void Menu::Draw() {
 
         case 3: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 3.9 (Jarvis)");
+            ImGui::Text("Version 3.10 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
             break;
         }

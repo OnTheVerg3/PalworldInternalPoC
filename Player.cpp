@@ -8,10 +8,7 @@
 
 namespace Player
 {
-    // ... (Variables and GetPlayerCandidates same as previous) ...
-    // Re-pasting standard variables for completeness:
-    bool bAttackMultiplier = false;
-    float fAttackModifier = 2.0f;
+    // [FIX] Removed Attack variables
     bool bWeightAdjuster = false;
     float fWeightModifier = 50000.0f;
     bool bUnlockMap = false;
@@ -89,9 +86,8 @@ namespace Player
 
     void ProcessAttributes(SDK::APalPlayerCharacter* pLocal)
     {
-        if (bAttackMultiplier && IsValidObject(pLocal->CharacterParameterComponent)) {
-            pLocal->CharacterParameterComponent->AttackUp = (int32_t)(50 * fAttackModifier);
-        }
+        // [FIX] Removed Attack Multiplier Logic
+
         SDK::APlayerController* PC = static_cast<SDK::APlayerController*>(pLocal->Controller);
         if (IsValidObject(PC) && IsValidObject(PC->PlayerState)) {
             SDK::APalPlayerState* pState = static_cast<SDK::APalPlayerState*>(PC->PlayerState);
@@ -133,10 +129,7 @@ namespace Player
             if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
                 auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
                 if (!FT->bUnlocked) {
-                    // Method 1: Local Interact (Works if authority/host)
                     FT->OnTriggerInteract(pLocal, SDK::EPalInteractiveObjectIndicatorType::UnlockFastTravel);
-
-                    // Method 2: RPC (Works if client)
                     if (NetworkPlayer) {
                         NetworkPlayer->RequestUnlockFastTravelPoint_ToServer(FT->FastTravelPointID);
                     }
