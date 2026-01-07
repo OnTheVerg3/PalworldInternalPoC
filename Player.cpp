@@ -94,7 +94,7 @@ namespace Player
                     inv->MaxInventoryWeight = fWeightModifier;
                 }
                 else {
-                    // [FIX] Reset to a reasonable default if disabled
+                    // [FIX] Reset to default if disabled
                     if (inv->MaxInventoryWeight > 5000.0f) inv->MaxInventoryWeight = 500.0f;
                 }
             }
@@ -134,7 +134,6 @@ namespace Player
             if (IsClass(Obj, "PalLevelObjectUnlockableFastTravelPoint")) {
                 auto* FT = static_cast<SDK::APalLevelObjectUnlockableFastTravelPoint*>(Obj);
                 if (!FT->bUnlocked) {
-                    // Send request for every found point
                     PalPC->Transmitter->Player->RequestUnlockFastTravelPoint_ToServer(FT->FastTravelPointID);
                 }
             }

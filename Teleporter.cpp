@@ -4,7 +4,7 @@
 #include <cstring>
 #include <string> 
 
-// Need access to D3D resources to free them before heavy teleports
+// [FIX] Need access to D3D resources to free them before loading screens
 extern ID3D11RenderTargetView* g_mainRenderTargetView;
 
 namespace Teleporter
@@ -30,14 +30,12 @@ namespace Teleporter
         if (!IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
 
         // [FIX] Release D3D Resources BEFORE teleporting.
-        // TeleportToSafePoint triggers a loading screen/viewport reset.
-        // If we hold the BackBuffer, the engine crashes (Error 80004004).
+        // Teleporting causes a viewport reset. Holding this pointer causes the 80004004 crash.
         if (g_mainRenderTargetView) {
             g_mainRenderTargetView->Release();
             g_mainRenderTargetView = nullptr;
         }
 
-        // Coordinates are approx. Scale 100 assumed or raw units.
         SDK::FVector SafeLoc = { Location.X, Location.Y, Location.Z + 100.0f };
         SDK::FQuat Rotation = { 0, 0, 0, 1 };
 
@@ -51,7 +49,6 @@ namespace Teleporter
         RegisterParams.Location = SafeLoc;
         RegisterParams.Rotation = Rotation;
 
-        // Register safe point then teleport to it
         CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
         CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
 
@@ -72,6 +69,7 @@ namespace Teleporter
         if (index >= 0 && index < Waypoints.size()) Waypoints.erase(Waypoints.begin() + index);
     }
 
+    // [FIX] Fixed Logic: Find ANY Base Camp Point by name (works without SDK class definition)
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal)
     {
         if (!SDK::UObject::GObjects) return;
@@ -83,12 +81,11 @@ namespace Teleporter
 
             if (Obj->IsA(SDK::AActor::StaticClass())) {
                 std::string ObjName = Obj->GetName();
-                // [FIX] Relaxed search string to find ANY base point
+                // Check if name contains "BaseCampPoint" (Matches BP_PalBaseCampPoint, etc)
                 if (ObjName.find("BaseCampPoint") != std::string::npos) {
                     SDK::AActor* BaseActor = static_cast<SDK::AActor*>(Obj);
                     SDK::FVector BaseLoc = BaseActor->K2_GetActorLocation();
 
-                    // Basic sanity check on coords (ignore 0,0,0)
                     if (BaseLoc.X != 0.0f && BaseLoc.Y != 0.0f) {
                         std::cout << "[Jarvis] Found Base: " << ObjName << std::endl;
                         TeleportTo(pLocal, BaseLoc);
@@ -102,7 +99,7 @@ namespace Teleporter
 
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex)
     {
-        // [FIX] Real Coordinates (Approximate based on map data)
+        // [FIX] Real Coordinates
         static const struct { const char* Name; SDK::FVector Loc; } Bosses[] = {
             { "Zoe & Grizzbolt", { 11200.0f, -43400.0f, 0.0f } },
             { "Lily & Lyleen",   { 18500.0f, 2800.0f, 0.0f } },

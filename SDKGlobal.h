@@ -93,14 +93,17 @@ namespace SDK {
         return static_cast<APalPlayerCharacter*>(pPawn);
     }
 
-    // [FIXED] Uses specific GetDefaultObj instead of generic UObject call
     inline void ExecuteConsoleCommand(const std::string& Command) {
         if (!pGWorld || !*pGWorld) return;
 
         static UFunction* fn = nullptr;
         if (!fn) fn = UObject::FindObject<UFunction>("Function Engine.KismetSystemLibrary.ExecuteConsoleCommand");
 
-        if (fn) {
+        // [FIX] Use FindObject to get the Default Object (CDO) reliably
+        static UObject* defaultObj = nullptr;
+        if (!defaultObj) defaultObj = UObject::FindObject<UObject>("Default__KismetSystemLibrary");
+
+        if (fn && defaultObj) {
             std::wstring wCommand(Command.begin(), Command.end());
             FString fCommand(wCommand.c_str());
 
@@ -114,8 +117,7 @@ namespace SDK {
             params.Command = fCommand;
             params.SpecificPlayer = nullptr;
 
-            // [FIX] Correct way to get the default object for a class in Dumper-7 SDKs
-            UKismetSystemLibrary::GetDefaultObj()->ProcessEvent(fn, &params);
+            defaultObj->ProcessEvent(fn, &params);
         }
     }
 }

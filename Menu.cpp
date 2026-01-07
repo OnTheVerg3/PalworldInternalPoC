@@ -61,8 +61,6 @@ void Menu::Draw() {
             if (ImGui::Checkbox("Infinite Mag", &Features::bInfiniteMagazine)) Features::bInfiniteAmmo = !Features::bInfiniteMagazine;
             ImGui::Spacing();
             ColoredSeparatorText("Properties", ImVec4(1, 1, 1, 1));
-            ImGui::Checkbox("Rapid Fire", &Features::bRapidFire);
-            ImGui::Checkbox("No Recoil", &Features::bNoRecoil);
             ImGui::Checkbox("No Durability Loss", &Features::bInfiniteDurability);
             ImGui::Spacing();
             ColoredSeparatorText("Damage", ImVec4(1, 0.3f, 0.3f, 1));
@@ -73,14 +71,14 @@ void Menu::Draw() {
         case 2: // VISUALS
             ColoredSeparatorText("Camera", ImVec4(1, 1, 1, 1));
             if (ImGui::SliderFloat("FOV", &Visuals::fFOV, 60.0f, 140.0f, "%.0f")) Visuals::Apply();
-            if (ImGui::SliderFloat("Gamma", &Visuals::fGamma, 0.1f, 5.0f, "%.1f")) Visuals::Apply();
+            if (ImGui::SliderFloat("Brightness", &Visuals::fGamma, 0.1f, 5.0f, "%.1f")) Visuals::Apply();
             if (ImGui::Button("Reset", ImVec2(150, 30))) { Visuals::fFOV = 90.0f; Visuals::fGamma = 0.5f; Visuals::Apply(); }
             break;
 
         case 3: ItemSpawner::DrawTab(); break;
 
         case 4: // TELEPORTER
-        {   // [FIX] Added Scoping Braces to fix C2360
+        {   // [FIX] Added Scoping Braces to fix C2360 error
             auto pLocal = Hooking::GetLocalPlayerSafe();
             ColoredSeparatorText("Base & Bosses", ImVec4(0.3f, 1.0f, 0.3f, 1));
             if (ImGui::Button("TP to Base", ImVec2(-1, 30))) if (pLocal) Teleporter::TeleportToHome(pLocal);
@@ -107,12 +105,12 @@ void Menu::Draw() {
                 ImGui::Text("%s", Teleporter::Waypoints[i].Name.c_str());
                 ImGui::PopID();
             }
-        } // [FIX] End Scope
+        } // End Scope
         break;
 
         case 5: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 3.0 (Jarvis)");
+            ImGui::Text("Version 3.1 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
             break;
         }

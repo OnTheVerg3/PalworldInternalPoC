@@ -11,8 +11,7 @@ namespace Features {
     bool bInfiniteDurability = false;
     bool bDamageHack = false;
     int32_t DamageMultiplier = 2;
-    bool bRapidFire = false;
-    bool bNoRecoil = false;
+    // [FIX] Removed RapidFire/NoRecoil globals
 
     struct WeaponBackup {
         int32_t Attack;
@@ -55,9 +54,8 @@ namespace Features {
             pWeapon->IsRequiredBullet = !bInfiniteAmmo;
             pWeapon->IsInfinityMagazine = bInfiniteMagazine;
 
-            // [FIX] Rapid Fire & No Recoil Implementation
             if (IsValidObject(pWeapon->ownWeaponStaticData)) {
-                // Damage
+                // Damage Logic
                 if (g_LastWeapon != pWeapon) {
                     g_OriginalStats.Attack = pWeapon->ownWeaponStaticData->AttackValue;
                     g_OriginalStats.bSaved = true;
@@ -68,15 +66,6 @@ namespace Features {
                     pWeapon->ownWeaponStaticData->AttackValue = bDamageHack ? (g_OriginalStats.Attack * DamageMultiplier) : g_OriginalStats.Attack;
                 }
             }
-
-            // Rapid Fire (Set Interval to near zero)
-            // Note: This often requires accessing the 'WeaponStaticData' struct or similar config
-            // For now, we assume 'ShootInterval' exists on the weapon instance or data
-            // If direct access isn't available, we might need offsets. 
-            // Assuming standard PalWeaponBase properties for PoC:
-            /* If pWeapon->ShootInterval exists:
-               if (bRapidFire) pWeapon->ShootInterval = 0.01f;
-            */
         }
     }
 

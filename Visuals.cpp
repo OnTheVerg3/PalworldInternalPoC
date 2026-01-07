@@ -12,8 +12,7 @@ namespace Visuals {
         SDK::ExecuteConsoleCommand(fovCmd);
 
         // Set Gamma (Brightness) using Midtones
-        // 0.5 is usually neutral/default in UE4/5 for this setting.
-        // Higher values (0.8 - 1.0) will drastically brighten shadows (Night Vision effect).
+        // 0.5 is neutral. Higher = Brighter shadows.
         std::string gammaCmd = "r.Color.Mid " + std::to_string(fGamma);
         SDK::ExecuteConsoleCommand(gammaCmd);
     }
