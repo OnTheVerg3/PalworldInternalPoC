@@ -13,9 +13,11 @@ extern uintptr_t g_GameBase;
 extern uintptr_t g_GameSize;
 
 // --- SHARED GLOBALS ---
-// These allow all other files to access the variables defined in Hooking.cpp
 extern std::atomic<bool> g_bIsSafe;
 extern SDK::APalPlayerCharacter* g_pLocal;
+
+// [FIX] Cooldown timer to block D3D access during teleport loading screens
+extern ULONGLONG g_TeleportCooldown;
 
 // --- MEMORY SAFETY ---
 inline bool IsSentinel(void* ptr) { return (uintptr_t)ptr == 0xFFFFFFFFFFFFFFFF; }
@@ -34,10 +36,7 @@ inline bool IsValidObject(SDK::UObject* pObj) {
     __try {
         void** vtablePtr = reinterpret_cast<void**>(pObj);
         void* vtable = *vtablePtr;
-
-        // Use IsGarbagePtr only. VMT Hooks move vtables to Heap, so bounds checks fail.
         if (IsGarbagePtr(vtable)) return false;
-
         return true;
     }
     __except (1) { return false; }

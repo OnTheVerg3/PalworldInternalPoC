@@ -16,8 +16,6 @@
 
 #pragma comment(lib, "psapi.lib")
 
-
-//Took 4 DAYS to find VMT Hooks were the answer for stability NEVER CHANGE THE METHOD WITHOUT ASKING
 // --- VMT HOOK INSTANCES ---
 VMTHook g_PawnHook;
 VMTHook g_ControllerHook;
@@ -34,6 +32,9 @@ SDK::UObject* g_pParam = nullptr;
 // Flags
 std::atomic<bool> g_bIsSafe(false);
 std::atomic<bool> g_PendingExit(false);
+
+// [FIX] Definition of the cooldown variable
+ULONGLONG g_TeleportCooldown = 0;
 
 bool g_ShowMenu = false;
 bool g_bHasAutoOpened = false;
@@ -106,9 +107,7 @@ __declspec(noinline) void PerformWorldExit() {
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
-    // [CRITICAL FIX] Release D3D Resources to prevent 80004004 Crash
-    // The engine needs to resize/destroy the swapchain during level transition.
-    // If we hold this reference, the engine crashes.
+    // Release D3D Resources
     if (g_mainRenderTargetView) {
         g_mainRenderTargetView->Release();
         g_mainRenderTargetView = nullptr;
@@ -137,7 +136,7 @@ __declspec(noinline) void PerformWorldExit() {
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
 
-    std::cout << "[Jarvis] World Exit: Cleanup Complete (D3D Released)." << std::endl;
+    std::cout << "[Jarvis] World Exit: Cleanup Complete." << std::endl;
 }
 
 // --- DETACH CHECKER ---
@@ -162,7 +161,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         g_ShowMenu = !g_ShowMenu;
         if (g_pd3dDevice && g_bIsSafe) {
             ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
-            // [OPTIONAL] We could ClipCursor(NULL) here, but ImGui usually handles it.
         }
     }
 
@@ -171,9 +169,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
             ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
         }
 
-        // [FIX] Selective Blocking.
-        // We ONLY return 1 (Block) for Mouse/Key messages.
-        // We MUST let Focus, Activate, Size, etc. pass through to the game.
         switch (uMsg) {
         case WM_MOUSEMOVE:
         case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
@@ -186,7 +181,6 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         case WM_CHAR:
             return 1; // Block input
         }
-        // Let other messages pass (WM_SIZE, WM_ACTIVATE, etc.)
     }
 
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
@@ -266,7 +260,6 @@ void AttachPlayerHooks_Logic() {
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) return;
 
-    // Detect new player
     if (pLocal != g_LastLocalPlayer) {
         std::cout << "[System] New Player Detected. Attaching VMT Hooks..." << std::endl;
 
@@ -319,7 +312,6 @@ void Present_Logic() {
         return;
     }
 
-    // Stabilization Logic
     if (g_TimePlayerDetected == 0) {
         g_TimePlayerDetected = CurrentTime;
         std::cout << "[System] Player detected. Stabilizing (3s)..." << std::endl;
@@ -343,6 +335,11 @@ void Present_Logic() {
 
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     if (g_GameBase == 0) InitModuleBounds();
+
+    // [FIX] Cooldown Check: If teleport is pending, Do NOT touch the swapchain
+    if (GetTickCount64() < g_TeleportCooldown) {
+        return oPresent(pSwapChain, SyncInterval, Flags);
+    }
 
     static bool bInputInitialized = false;
     if (!bInputInitialized) {
