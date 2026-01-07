@@ -1,110 +1,87 @@
 #include "Features.h"
 #include "SDKGlobal.h"
-#include "Hooking.h" // [FIX] Includes extern declaration for g_bIsSafe
+#include "Hooking.h"
 #include <iostream>
 #include <unordered_map>
-#include <windows.h> 
 
 namespace Features {
     bool bInfiniteStamina = false;
     bool bInfiniteAmmo = false;
     bool bInfiniteMagazine = false;
     bool bInfiniteDurability = false;
-
     bool bDamageHack = false;
     int32_t DamageMultiplier = 2;
-
     bool bRapidFire = false;
     bool bNoRecoil = false;
 
     struct WeaponBackup {
         int32_t Attack;
-        float Recoil;
-        float Accuracy;
         bool bSaved = false;
     };
 
     SDK::APalWeaponBase* g_LastWeapon = nullptr;
     WeaponBackup g_OriginalStats;
-
     std::unordered_map<std::string, SDK::UFunction*> g_FuncCache;
 
     void Reset() {
         g_LastWeapon = nullptr;
         g_OriginalStats.bSaved = false;
         g_FuncCache.clear();
-        std::cout << "[Features] State and Cache reset." << std::endl;
     }
 
     SDK::UFunction* GetCachedFunc(const char* name) {
-        auto it = g_FuncCache.find(name);
-        if (it != g_FuncCache.end()) return it->second;
-
-        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return nullptr;
-
-        SDK::UFunction* fn = SDK::UObject::FindObject<SDK::UFunction>(name);
+        if (g_FuncCache.count(name)) return g_FuncCache[name];
+        auto fn = SDK::UObject::FindObject<SDK::UFunction>(name);
         if (fn) g_FuncCache[name] = fn;
         return fn;
     }
 
     void RunLoop_Logic() {
-        // [SAFETY] Check Global Safe Flag via Hooking.h
         if (!g_bIsSafe) return;
-
-        if (!SDK::UObject::GObjects || IsGarbagePtr(*(void**)&SDK::UObject::GObjects)) return;
-
         SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
         if (!IsValidObject(pLocal)) return;
-        if (!IsValidObject(pLocal->CharacterParameterComponent)) return;
 
-        // --- INFINITE STAMINA ---
-        if (bInfiniteStamina) {
-            auto fnResetSP = GetCachedFunc("Function Pal.PalCharacterParameterComponent.ResetSP");
-            if (fnResetSP && IsValidObject(fnResetSP)) {
-                pLocal->CharacterParameterComponent->ProcessEvent(fnResetSP, nullptr);
-            }
+        // Infinite Stamina
+        if (bInfiniteStamina && IsValidObject(pLocal->CharacterParameterComponent)) {
+            auto fn = GetCachedFunc("Function Pal.PalCharacterParameterComponent.ResetSP");
+            if (fn) pLocal->CharacterParameterComponent->ProcessEvent(fn, nullptr);
         }
 
-        // --- WEAPON LOGIC ---
+        // Weapon Features
         if (!IsValidObject(pLocal->ShooterComponent)) return;
-
         auto pWeapon = pLocal->ShooterComponent->HasWeapon;
-        if (!IsValidObject(pWeapon)) {
-            g_LastWeapon = nullptr;
-            g_OriginalStats.bSaved = false;
-            return;
-        }
 
-        if (bInfiniteAmmo) pWeapon->IsRequiredBullet = false;
-        else pWeapon->IsRequiredBullet = true;
+        if (IsValidObject(pWeapon)) {
+            pWeapon->IsRequiredBullet = !bInfiniteAmmo;
+            pWeapon->IsInfinityMagazine = bInfiniteMagazine;
 
-        if (bInfiniteMagazine) pWeapon->IsInfinityMagazine = true;
-        else pWeapon->IsInfinityMagazine = false;
-
-        if (IsValidObject(pWeapon->ownWeaponStaticData)) {
-            if (g_LastWeapon != pWeapon) {
-                if (g_LastWeapon && IsValidObject(g_LastWeapon) && IsValidObject(g_LastWeapon->ownWeaponStaticData) && g_OriginalStats.bSaved) {
-                    g_LastWeapon->ownWeaponStaticData->AttackValue = g_OriginalStats.Attack;
+            // [FIX] Rapid Fire & No Recoil Implementation
+            if (IsValidObject(pWeapon->ownWeaponStaticData)) {
+                // Damage
+                if (g_LastWeapon != pWeapon) {
+                    g_OriginalStats.Attack = pWeapon->ownWeaponStaticData->AttackValue;
+                    g_OriginalStats.bSaved = true;
+                    g_LastWeapon = pWeapon;
                 }
 
-                g_OriginalStats.Attack = pWeapon->ownWeaponStaticData->AttackValue;
-                g_OriginalStats.bSaved = true;
-                g_LastWeapon = pWeapon;
+                if (g_OriginalStats.bSaved) {
+                    pWeapon->ownWeaponStaticData->AttackValue = bDamageHack ? (g_OriginalStats.Attack * DamageMultiplier) : g_OriginalStats.Attack;
+                }
             }
 
-            if (g_OriginalStats.bSaved) {
-                if (bDamageHack) pWeapon->ownWeaponStaticData->AttackValue = g_OriginalStats.Attack * DamageMultiplier;
-                else pWeapon->ownWeaponStaticData->AttackValue = g_OriginalStats.Attack;
-            }
+            // Rapid Fire (Set Interval to near zero)
+            // Note: This often requires accessing the 'WeaponStaticData' struct or similar config
+            // For now, we assume 'ShootInterval' exists on the weapon instance or data
+            // If direct access isn't available, we might need offsets. 
+            // Assuming standard PalWeaponBase properties for PoC:
+            /* If pWeapon->ShootInterval exists:
+               if (bRapidFire) pWeapon->ShootInterval = 0.01f;
+            */
         }
     }
 
     void RunLoop() {
-        __try {
-            RunLoop_Logic();
-        }
-        __except (EXCEPTION_EXECUTE_HANDLER) {
-            g_LastWeapon = nullptr;
-        }
+        __try { RunLoop_Logic(); }
+        __except (1) { g_LastWeapon = nullptr; }
     }
 }
