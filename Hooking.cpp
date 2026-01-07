@@ -7,6 +7,7 @@
 #include "imgui_impl_win32.h"
 #include "imgui_impl_dx11.h"
 #include "Player.h" 
+#include "Teleporter.h" // [FIX] Added include
 #include <iostream>
 #include <vector>
 #include <algorithm>
@@ -33,7 +34,6 @@ SDK::UObject* g_pParam = nullptr;
 std::atomic<bool> g_bIsSafe(false);
 std::atomic<bool> g_PendingExit(false);
 
-// [FIX] Definition of the cooldown variable
 ULONGLONG g_TeleportCooldown = 0;
 
 bool g_ShowMenu = false;
@@ -100,42 +100,33 @@ bool RawStrContains(const char* haystack, const char* needle) {
     return strstr(haystack, needle) != nullptr;
 }
 
-// --- CLEANUP (RESTORE ORIGINAL STATE) ---
+// --- CLEANUP ---
 __declspec(noinline) void PerformWorldExit() {
     g_bIsSafe = false;
     g_PendingExit = false;
     g_ExitCooldown = GetTickCount64() + 3000;
     g_TimePlayerDetected = 0;
 
-    // Release D3D Resources
     if (g_mainRenderTargetView) {
         g_mainRenderTargetView->Release();
         g_mainRenderTargetView = nullptr;
     }
 
     g_HookMutex.lock();
-
-    // 1. Restore VTables
     g_PawnHook.Restore();
     g_ControllerHook.Restore();
     g_ParamHook.Restore();
-
-    // 2. Clear Pointers
     g_pLocal = nullptr;
     g_pController = nullptr;
     g_pParam = nullptr;
     g_LastLocalPlayer = nullptr;
-
-    // 3. Reset Features
     Features::Reset();
     Player::Reset();
     Menu::Reset();
-
     g_HookMutex.unlock();
 
     g_ShowMenu = false;
     g_bHasAutoOpened = false;
-
     std::cout << "[Jarvis] World Exit: Cleanup Complete." << std::endl;
 }
 
@@ -148,7 +139,7 @@ __declspec(noinline) void CheckForExit(SDK::UObject* pObject, const char* name) 
     {
         if (pObject == g_pLocal || pObject == g_pController) {
             if (!g_PendingExit) {
-                std::cout << "[Jarvis] Exit detected via: " << name << ". Scheduling Cleanup." << std::endl;
+                std::cout << "[Jarvis] Exit detected. Scheduling Cleanup." << std::endl;
                 g_PendingExit = true;
             }
         }
@@ -159,16 +150,10 @@ __declspec(noinline) void CheckForExit(SDK::UObject* pObject, const char* name) 
 LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
     if (uMsg == WM_KEYDOWN && wParam == VK_INSERT) {
         g_ShowMenu = !g_ShowMenu;
-        if (g_pd3dDevice && g_bIsSafe) {
-            ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
-        }
+        if (g_pd3dDevice && g_bIsSafe) ImGui::GetIO().MouseDrawCursor = g_ShowMenu;
     }
-
     if (g_ShowMenu && g_bIsSafe) {
-        if (g_pd3dDevice) {
-            ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
-        }
-
+        if (g_pd3dDevice) ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
         switch (uMsg) {
         case WM_MOUSEMOVE:
         case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK:
@@ -179,10 +164,9 @@ LRESULT __stdcall WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lPar
         case WM_KEYDOWN: case WM_KEYUP:
         case WM_SYSKEYDOWN: case WM_SYSKEYUP:
         case WM_CHAR:
-            return 1; // Block input
+            return 1;
         }
     }
-
     return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
 
@@ -201,7 +185,7 @@ bool ProcessEvent_Logic(SDK::UObject* pObject, SDK::UFunction* pFunction, const 
     return false;
 }
 
-// --- THE HOOK CALLBACK ---
+// --- HOOKS ---
 void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction, void* pParams) {
     ProcessEvent_t oFunc = nullptr;
     if (pObject == g_pLocal) oFunc = g_PawnHook.GetOriginal<ProcessEvent_t>(67);
@@ -217,40 +201,27 @@ void __fastcall hkProcessEvent(SDK::UObject* pObject, SDK::UFunction* pFunction,
         GetNameSafe(pFunction, name, sizeof(name));
         if (name[0] != '\0') {
             CheckForExit(pObject, name);
-
-            if (g_PendingExit || !g_bIsSafe) {
-                return oFunc(pObject, pFunction, pParams);
-            }
-
+            if (g_PendingExit || !g_bIsSafe) return oFunc(pObject, pFunction, pParams);
             if (ProcessEvent_Logic(pObject, pFunction, name)) return;
         }
-
         return oFunc(pObject, pFunction, pParams);
     }
-    __except (1) {
-        return oFunc(pObject, pFunction, pParams);
-    }
+    __except (1) { return oFunc(pObject, pFunction, pParams); }
 }
 
-// --- INITIALIZATION ---
 SDK::APalPlayerCharacter* Internal_GetLocalPlayer() {
     __try {
         if (!SDK::pGWorld || !*SDK::pGWorld) return nullptr;
         SDK::UWorld* pWorld = *SDK::pGWorld;
         if (!IsValidObject(pWorld)) return nullptr;
-
         SDK::UGameInstance* pGI = pWorld->OwningGameInstance;
         if (!IsValidObject(pGI) || pGI->LocalPlayers.Num() <= 0) return nullptr;
-
         SDK::ULocalPlayer* pLocalPlayer = pGI->LocalPlayers[0];
         if (!IsValidObject(pLocalPlayer)) return nullptr;
-
         SDK::APlayerController* pPC = pLocalPlayer->PlayerController;
         if (!IsValidObject(pPC)) return nullptr;
-
         SDK::APawn* pPawn = pPC->Pawn;
         if (!IsValidObject(pPawn)) return nullptr;
-
         return static_cast<SDK::APalPlayerCharacter*>(pPawn);
     }
     __except (1) { return nullptr; }
@@ -262,65 +233,32 @@ void AttachPlayerHooks_Logic() {
 
     if (pLocal != g_LastLocalPlayer) {
         std::cout << "[System] New Player Detected. Attaching VMT Hooks..." << std::endl;
-
         g_HookMutex.lock();
         Features::Reset();
         Player::Reset();
-
         g_pLocal = pLocal;
         g_pController = pLocal->Controller;
         g_pParam = pLocal->CharacterParameterComponent;
-
-        if (g_PawnHook.Init(pLocal)) {
-            g_PawnHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
-            std::cout << "[+] Pawn Hooked (VMT)" << std::endl;
-        }
-
-        if (IsValidObject(g_pController) && g_ControllerHook.Init(g_pController)) {
-            g_ControllerHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
-            std::cout << "[+] Controller Hooked (VMT)" << std::endl;
-        }
-
-        if (IsValidObject(g_pParam) && g_ParamHook.Init(g_pParam)) {
-            g_ParamHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
-            std::cout << "[+] Param Hooked (VMT)" << std::endl;
-        }
-
+        if (g_PawnHook.Init(pLocal)) g_PawnHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
+        if (IsValidObject(g_pController) && g_ControllerHook.Init(g_pController)) g_ControllerHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
+        if (IsValidObject(g_pParam) && g_ParamHook.Init(g_pParam)) g_ParamHook.Hook<ProcessEvent_t>(67, &hkProcessEvent);
         g_LastLocalPlayer = pLocal;
         g_HookMutex.unlock();
     }
 }
 
 void Present_Logic() {
-    if (g_PendingExit) {
-        PerformWorldExit();
-        return;
-    }
-
-    ULONGLONG CurrentTime = GetTickCount64();
-    if (CurrentTime < g_ExitCooldown) {
-        g_bIsSafe = false;
-        return;
-    }
+    if (g_PendingExit) { PerformWorldExit(); return; }
+    if (GetTickCount64() < g_ExitCooldown) { g_bIsSafe = false; return; }
 
     SDK::APalPlayerCharacter* pLocal = Internal_GetLocalPlayer();
     if (!IsValidObject(pLocal)) {
-        if (g_LastLocalPlayer != nullptr) {
-            std::cout << "[Jarvis] Player pointer lost. Triggering exit." << std::endl;
-            PerformWorldExit();
-        }
+        if (g_LastLocalPlayer != nullptr) PerformWorldExit();
         return;
     }
 
-    if (g_TimePlayerDetected == 0) {
-        g_TimePlayerDetected = CurrentTime;
-        std::cout << "[System] Player detected. Stabilizing (3s)..." << std::endl;
-    }
-
-    if ((CurrentTime - g_TimePlayerDetected) < 3000) {
-        g_bIsSafe = false;
-        return;
-    }
+    if (g_TimePlayerDetected == 0) g_TimePlayerDetected = GetTickCount64();
+    if ((GetTickCount64() - g_TimePlayerDetected) < 3000) { g_bIsSafe = false; return; }
 
     g_bIsSafe = true;
     AttachPlayerHooks_Logic();
@@ -336,7 +274,13 @@ void Present_Logic() {
 HRESULT __stdcall hkPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT Flags) {
     if (g_GameBase == 0) InitModuleBounds();
 
-    // [FIX] Cooldown Check: If teleport is pending, Do NOT touch the swapchain
+    // [FIX] Process Pending Teleport BEFORE rendering
+    // If a teleport executes, it returns early to skip the frame.
+    if (Teleporter::bTeleportPending) {
+        Teleporter::ProcessQueue();
+        return oPresent(pSwapChain, SyncInterval, Flags);
+    }
+
     if (GetTickCount64() < g_TeleportCooldown) {
         return oPresent(pSwapChain, SyncInterval, Flags);
     }
@@ -406,15 +350,10 @@ void Hooking::Init() {
     scd.BufferCount = 1; scd.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM; scd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     scd.OutputWindow = hWnd; scd.SampleDesc.Count = 1; scd.Windowed = true; scd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
     ID3D11Device* dev; ID3D11DeviceContext* ctx; IDXGISwapChain* swap;
-
     if (SUCCEEDED(D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, levels, 1, D3D11_SDK_VERSION, &scd, &swap, &dev, NULL, &ctx))) {
-        DWORD_PTR* vtable = (DWORD_PTR*)swap;
-        vtable = (DWORD_PTR*)vtable[0];
+        DWORD_PTR* vtable = (DWORD_PTR*)swap; vtable = (DWORD_PTR*)vtable[0];
         void* presentAddr = (void*)vtable[8];
-
-        swap->Release(); dev->Release(); ctx->Release();
-        DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
-
+        swap->Release(); dev->Release(); ctx->Release(); DestroyWindow(hWnd); UnregisterClass("DX11 Dummy", wc.hInstance);
         if (MH_Initialize() == MH_OK) {
             InitModuleBounds();
             MH_CreateHook(presentAddr, &hkPresent, (void**)&oPresent);

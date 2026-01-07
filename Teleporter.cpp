@@ -3,16 +3,18 @@
 #include <iostream>
 #include <cstring>
 #include <string> 
-#include <algorithm> // For std::transform
+#include <algorithm> 
 
-// [FIX] Needed to release the D3D context before teleporting to prevent Error 80004004
+// D3D Globals required for cleanup
 extern ID3D11DeviceContext* g_pd3dContext;
 extern ID3D11RenderTargetView* g_mainRenderTargetView;
-extern ULONGLONG g_TeleportCooldown; // [FIX] Access the cooldown timer
+extern ULONGLONG g_TeleportCooldown;
 
 namespace Teleporter
 {
     std::vector<CustomWaypoint> Waypoints;
+    bool bTeleportPending = false;
+    SDK::FVector TargetLocation = { 0, 0, 0 };
 
     void CallFn(SDK::UObject* obj, const char* fnName, void* params = nullptr) {
         if (!IsValidObject(obj)) return;
@@ -20,21 +22,35 @@ namespace Teleporter
         if (fn) obj->ProcessEvent(fn, params);
     }
 
-    void TeleportTo(SDK::APalPlayerCharacter* pLocal, SDK::FVector Location)
+    // [FIX] UI calls this. It handles NO engine logic, preventing crashes.
+    void QueueTeleport(SDK::FVector Location)
     {
-        if (!IsValidObject(pLocal)) return;
+        TargetLocation = Location;
+        bTeleportPending = true;
+        std::cout << "[Jarvis] Teleport Queued. Waiting for next frame..." << std::endl;
+    }
+
+    // [FIX] This is called at the start of Present, BEFORE any rendering.
+    void ProcessQueue()
+    {
+        if (!bTeleportPending) return;
+
+        SDK::APalPlayerCharacter* pLocal = Hooking::GetLocalPlayerSafe();
+        if (!IsValidObject(pLocal)) {
+            bTeleportPending = false;
+            return;
+        }
 
         SDK::APlayerController* PC = static_cast<SDK::APlayerController*>(pLocal->Controller);
-        if (!IsValidObject(PC) || !IsValidObject(PC->PlayerState)) return;
+        if (!IsValidObject(PC) || !IsValidObject(PC->PlayerState)) {
+            bTeleportPending = false;
+            return;
+        }
 
         SDK::APalPlayerController* PalPC = static_cast<SDK::APalPlayerController*>(PC);
         SDK::APalPlayerState* PalState = static_cast<SDK::APalPlayerState*>(PC->PlayerState);
 
-        if (!IsValidObject(PalPC->Transmitter) || !IsValidObject(PalPC->Transmitter->Player)) return;
-
-        // [CRITICAL FIX] Set cooldown and release D3D resources
-        g_TeleportCooldown = GetTickCount64() + 5000; // Block UI/RTV for 5 seconds
-
+        // 1. Release D3D Resources (Safe now because we aren't rendering)
         if (g_pd3dContext) {
             ID3D11RenderTargetView* nullViews[] = { nullptr };
             g_pd3dContext->OMSetRenderTargets(1, nullViews, nullptr);
@@ -44,7 +60,11 @@ namespace Teleporter
             g_mainRenderTargetView = nullptr;
         }
 
-        SDK::FVector SafeLoc = { Location.X, Location.Y, Location.Z + 100.0f };
+        // 2. Set Cooldown to block rendering during load screen
+        g_TeleportCooldown = GetTickCount64() + 5000;
+
+        // 3. Execute Engine Teleport
+        SDK::FVector SafeLoc = { TargetLocation.X, TargetLocation.Y, TargetLocation.Z + 100.0f };
         SDK::FQuat Rotation = { 0, 0, 0, 1 };
 
         struct {
@@ -57,10 +77,13 @@ namespace Teleporter
         RegisterParams.Location = SafeLoc;
         RegisterParams.Rotation = Rotation;
 
-        CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
-        CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
+        if (IsValidObject(PalPC->Transmitter) && IsValidObject(PalPC->Transmitter->Player)) {
+            CallFn(PalPC->Transmitter->Player, "Function Pal.PalNetworkPlayerComponent.RegisterRespawnPoint_ToServer", &RegisterParams);
+            CallFn(PalPC, "Function Pal.PalPlayerController.TeleportToSafePoint_ToServer", nullptr);
+            std::cout << "[Jarvis] Teleport Executed." << std::endl;
+        }
 
-        std::cout << "[Jarvis] Teleport executed. D3D Resources released." << std::endl;
+        bTeleportPending = false;
     }
 
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName)
@@ -77,37 +100,43 @@ namespace Teleporter
         if (index >= 0 && index < Waypoints.size()) Waypoints.erase(Waypoints.begin() + index);
     }
 
-    // [FIX] Case-Insensitive Search for Base Camp
+    // [FIX] Improved Base Search with Logging
     void TeleportToHome(SDK::APalPlayerCharacter* pLocal)
     {
         if (!SDK::UObject::GObjects) return;
         std::cout << "[Jarvis] Scanning for Base Camp..." << std::endl;
 
+        bool bFound = false;
+
+        // Iterate ALL UObjects (slower but thorough) to find the class
         for (int i = 0; i < SDK::UObject::GObjects->Num(); i++) {
             SDK::UObject* Obj = SDK::UObject::GObjects->GetByIndex(i);
             if (!IsValidObject(Obj)) continue;
 
+            // Check if it's an Actor to verify it has a location
             if (Obj->IsA(SDK::AActor::StaticClass())) {
-                std::string ObjName = Obj->GetName();
+                std::string Name = Obj->GetName();
 
-                // Convert to lowercase for safer matching
-                std::string LowerName = ObjName;
-                std::transform(LowerName.begin(), LowerName.end(), LowerName.begin(), ::tolower);
+                // Lowercase conversion
+                std::transform(Name.begin(), Name.end(), Name.begin(), ::tolower);
 
-                // Look for "basecamppoint" inside names like "BP_PalBaseCampPoint_C"
-                if (LowerName.find("basecamppoint") != std::string::npos) {
-                    SDK::AActor* BaseActor = static_cast<SDK::AActor*>(Obj);
-                    SDK::FVector BaseLoc = BaseActor->K2_GetActorLocation();
+                // Matches "bp_palbasecamppoint" or "basecamppoint"
+                if (Name.find("basecamppoint") != std::string::npos) {
 
-                    if (BaseLoc.X != 0.0f && BaseLoc.Y != 0.0f) {
-                        std::cout << "[Jarvis] Found Base: " << ObjName << std::endl;
-                        TeleportTo(pLocal, BaseLoc);
-                        return; // Teleport to the first one found
+                    SDK::AActor* Actor = static_cast<SDK::AActor*>(Obj);
+                    SDK::FVector Loc = Actor->K2_GetActorLocation();
+
+                    if (Loc.X != 0.0f || Loc.Y != 0.0f) {
+                        std::cout << "[Jarvis] Found Base Candidate: " << Obj->GetName() << std::endl;
+                        QueueTeleport(Loc); // Queue it immediately
+                        bFound = true;
+                        break;
                     }
                 }
             }
         }
-        std::cout << "[-] No Base Camp found in loaded chunks." << std::endl;
+
+        if (!bFound) std::cout << "[-] No Base Camp Point found in GObjects." << std::endl;
     }
 
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex)
@@ -121,7 +150,7 @@ namespace Teleporter
         };
 
         if (bossIndex >= 0 && bossIndex < 5) {
-            TeleportTo(pLocal, Bosses[bossIndex].Loc);
+            QueueTeleport(Bosses[bossIndex].Loc);
         }
     }
 }

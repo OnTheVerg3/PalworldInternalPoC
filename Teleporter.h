@@ -1,7 +1,7 @@
 #pragma once
+#include "SDKGlobal.h"
 #include <vector>
 #include <string>
-#include "SDKGlobal.h"
 
 struct CustomWaypoint {
     std::string Name;
@@ -13,14 +13,19 @@ namespace Teleporter
 {
     extern std::vector<CustomWaypoint> Waypoints;
 
-    // Core Function (The PalGuard Bypass)
-    void TeleportTo(SDK::APalPlayerCharacter* pLocal, SDK::FVector Location);
+    // [FIX] State flags for Deferred Teleportation
+    extern bool bTeleportPending;
+    extern SDK::FVector TargetLocation;
 
-    // Waypoint Management
+    // Queues a teleport request (Safe to call from UI)
+    void QueueTeleport(SDK::FVector Location);
+
+    // Executes the queued teleport (Call from Hooking::hkPresent start)
+    void ProcessQueue();
+
     void AddWaypoint(SDK::APalPlayerCharacter* pLocal, const char* pName);
     void DeleteWaypoint(int index);
 
-    // Preset Teleports
-    void TeleportToHome(SDK::APalPlayerCharacter* pLocal); // Todo: Logic to find base
+    void TeleportToHome(SDK::APalPlayerCharacter* pLocal);
     void TeleportToBoss(SDK::APalPlayerCharacter* pLocal, int bossIndex);
 }

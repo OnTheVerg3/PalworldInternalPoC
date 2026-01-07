@@ -70,18 +70,14 @@ void Menu::Draw() {
         case 2: // VISUALS
             ColoredSeparatorText("Camera", ImVec4(1, 1, 1, 1));
             if (ImGui::SliderFloat("FOV", &Visuals::fFOV, 60.0f, 140.0f, "%.0f")) Visuals::Apply();
-
-            // [FIX] Inverted Gamma slider so Right = Brighter (0.1)
-            // Low Value = Brighter Midtones in UE
-            if (ImGui::SliderFloat("Brightness", &Visuals::fGamma, 2.0f, 0.05f, "%.2f")) Visuals::Apply();
-
+            if (ImGui::SliderFloat("Brightness", &Visuals::fGamma, 1.0f, 0.1f, "%.2f")) Visuals::Apply();
             if (ImGui::Button("Reset", ImVec2(150, 30))) { Visuals::fFOV = 90.0f; Visuals::fGamma = 0.5f; Visuals::Apply(); }
             break;
 
         case 3: ItemSpawner::DrawTab(); break;
 
         case 4: // TELEPORTER
-        {   // [FIX] Added Scoping Braces to fix C2360 error
+        {
             auto pLocal = Hooking::GetLocalPlayerSafe();
             ColoredSeparatorText("Base & Bosses", ImVec4(0.3f, 1.0f, 0.3f, 1));
             if (ImGui::Button("TP to Base", ImVec2(-1, 30))) if (pLocal) Teleporter::TeleportToHome(pLocal);
@@ -101,19 +97,20 @@ void Menu::Draw() {
             ImGui::Spacing();
             for (int i = 0; i < Teleporter::Waypoints.size(); ++i) {
                 ImGui::PushID(i);
-                if (ImGui::Button("TP")) if (pLocal) Teleporter::TeleportTo(pLocal, Teleporter::Waypoints[i].Location);
+                // [FIX] Use QueueTeleport
+                if (ImGui::Button("TP")) if (pLocal) Teleporter::QueueTeleport(Teleporter::Waypoints[i].Location);
                 ImGui::SameLine();
                 if (ImGui::Button("DEL")) Teleporter::DeleteWaypoint(i);
                 ImGui::SameLine();
                 ImGui::Text("%s", Teleporter::Waypoints[i].Name.c_str());
                 ImGui::PopID();
             }
-        } // End Scope
+        }
         break;
 
         case 5: // SETTINGS
             ColoredSeparatorText("Config", ImVec4(1, 1, 1, 1));
-            ImGui::Text("Version 3.2 (Jarvis)");
+            ImGui::Text("Version 3.3 (Jarvis)");
             if (ImGui::Button("Unload")) Hooking::Shutdown();
             break;
         }
